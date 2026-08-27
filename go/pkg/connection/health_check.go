@@ -12,8 +12,8 @@ import (
 // Defaults for callers that pass zero. Each consumer's chart sets its own values,
 // so these are a floor rather than the configured behaviour anywhere.
 const (
-	DefaultKeepAliveInterval    = 30 * time.Second
-	DefaultKeepAliveMaxFailures = 10
+	DefaultHealthCheckInterval    = 30 * time.Second
+	DefaultHealthCheckMaxFailures = 10
 )
 
 // Transition is a change in what the keep-alive believes about Octopus Server's
@@ -39,7 +39,7 @@ func (t Transition) String() string {
 	return "down"
 }
 
-// KeepAlive sends periodic gRPC health check RPCs as application-level
+// HealthCheck sends periodic gRPC health check RPCs as application-level
 // keep-alives. This keeps connections alive through load balancers that
 // incorrectly respond to TCP-level gRPC keepalive frames.
 //
@@ -48,7 +48,7 @@ func (t Transition) String() string {
 // be restarted. If failures reach the configured maximum it sends a fatal error
 // to Errors() and stops, allowing the process to exit and be restarted by
 // Kubernetes.
-type KeepAlive struct {
+type HealthCheck struct {
 	ctx                    context.Context
 	client                 grpc_health_v1.HealthClient
 	interval               time.Duration
@@ -59,22 +59,22 @@ type KeepAlive struct {
 	consecutiveFailures    int
 }
 
-func NewKeepAlive(
+func NewHealthCheck(
 	ctx context.Context,
 	client grpc_health_v1.HealthClient,
 	interval time.Duration,
 	maxConsecutiveFailures int,
 	logger *slog.Logger,
-) *KeepAlive {
+) *HealthCheck {
 	if interval <= 0 {
-		interval = DefaultKeepAliveInterval
+		interval = DefaultHealthCheckInterval
 	}
 
 	if maxConsecutiveFailures <= 0 {
-		maxConsecutiveFailures = DefaultKeepAliveMaxFailures
+		maxConsecutiveFailures = DefaultHealthCheckMaxFailures
 	}
 
-	return &KeepAlive{
+	return &HealthCheck{
 		ctx:                    ctx,
 		client:                 client,
 		interval:               interval,
@@ -89,7 +89,7 @@ func NewKeepAlive(
 // exceed the limit. On the first failure it emits Down; on recovery
 // it emits Up. If max consecutive failures is reached it sends a
 // fatal error to Errors() and stops.
-func (h *KeepAlive) Start() {
+func (h *HealthCheck) Start() {
 	h.logger.Info("Starting application keep alive",
 		slog.Any("interval", h.interval),
 		slog.Any("maxConsecutiveFailures", h.maxConsecutiveFailures),
@@ -142,19 +142,19 @@ func (h *KeepAlive) Start() {
 	}
 }
 
-func (h *KeepAlive) Events() <-chan Transition {
+func (h *HealthCheck) Events() <-chan Transition {
 	return h.events
 }
 
-func (h *KeepAlive) Errors() <-chan error {
+func (h *HealthCheck) Errors() <-chan error {
 	return h.fatal
 }
 
-func (h *KeepAlive) Context() context.Context {
+func (h *HealthCheck) Context() context.Context {
 	return h.ctx
 }
 
-func (h *KeepAlive) AwaitHealthRecovery(ctx context.Context) bool {
+func (h *HealthCheck) AwaitRecovery(ctx context.Context) bool {
 	for {
 		select {
 		case <-ctx.Done():

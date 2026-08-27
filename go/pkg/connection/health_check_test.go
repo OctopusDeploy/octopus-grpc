@@ -59,7 +59,7 @@ func TestKeepAlive_Start_SuccessfulChecks(t *testing.T) {
 		},
 	}
 
-	keepalive := NewKeepAlive(ctx, client, 100*time.Millisecond, 1, discardLogger())
+	keepalive := NewHealthCheck(ctx, client, 100*time.Millisecond, 1, discardLogger())
 	go keepalive.Start()
 	<-ctx.Done()
 
@@ -84,7 +84,7 @@ func TestKeepAlive_Start_SendsDownEventOnFirstFailure(t *testing.T) {
 	}
 
 	// maxConsecutiveFailures = 10 — should not reach fatal before first DOWN event
-	keepalive := NewKeepAlive(ctx, client, 50*time.Millisecond, 10, discardLogger())
+	keepalive := NewHealthCheck(ctx, client, 50*time.Millisecond, 10, discardLogger())
 	go keepalive.Start()
 
 	select {
@@ -110,7 +110,7 @@ func TestKeepAlive_Start_SendsDownEventOnNotServingResponse(t *testing.T) {
 	}
 
 	// maxConsecutiveFailures = 10 — should not reach fatal before first DOWN event
-	keepalive := NewKeepAlive(ctx, client, 50*time.Millisecond, 10, discardLogger())
+	keepalive := NewHealthCheck(ctx, client, 50*time.Millisecond, 10, discardLogger())
 	go keepalive.Start()
 
 	select {
@@ -138,7 +138,7 @@ func TestKeepAlive_Start_DoesNotResendDownOnSubsequentFailures(t *testing.T) {
 	}
 
 	// maxConsecutiveFailures = 5, interval fast enough to get several ticks
-	keepalive := NewKeepAlive(ctx, client, 30*time.Millisecond, 5, discardLogger())
+	keepalive := NewHealthCheck(ctx, client, 30*time.Millisecond, 5, discardLogger())
 	go keepalive.Start()
 
 	// Collect events until fatal
@@ -181,7 +181,7 @@ func TestKeepAlive_Start_SendsUpEventOnRecovery(t *testing.T) {
 		},
 	}
 
-	keepalive := NewKeepAlive(ctx, client, 50*time.Millisecond, 10, discardLogger())
+	keepalive := NewHealthCheck(ctx, client, 50*time.Millisecond, 10, discardLogger())
 	go keepalive.Start()
 
 	// First event must be DOWN
@@ -217,7 +217,7 @@ func TestKeepAlive_Start_FatalAfterMaxConsecutiveFailures(t *testing.T) {
 		},
 	}
 
-	keepalive := NewKeepAlive(ctx, client, 50*time.Millisecond, 1, discardLogger())
+	keepalive := NewHealthCheck(ctx, client, 50*time.Millisecond, 1, discardLogger())
 	go keepalive.Start()
 
 	select {
@@ -245,7 +245,7 @@ func TestKeepAlive_Start_ResetsConsecutiveFailuresOnSuccess(t *testing.T) {
 		},
 	}
 
-	keepalive := NewKeepAlive(ctx, client, 50*time.Millisecond, 5, discardLogger())
+	keepalive := NewHealthCheck(ctx, client, 50*time.Millisecond, 5, discardLogger())
 	go keepalive.Start()
 
 	time.Sleep(500 * time.Millisecond)
@@ -267,7 +267,7 @@ func TestKeepAlive_Start_StopsOnContextCancellation(t *testing.T) {
 		},
 	}
 
-	keepalive := NewKeepAlive(ctx, client, 100*time.Millisecond, 1, discardLogger())
+	keepalive := NewHealthCheck(ctx, client, 100*time.Millisecond, 1, discardLogger())
 	done := make(chan struct{})
 	go func() {
 		keepalive.Start()
@@ -290,9 +290,9 @@ func TestNewKeepAlive_ZeroIntervalUsesDefault(t *testing.T) {
 			return servingResponse()
 		},
 	}
-	keepalive := NewKeepAlive(ctx, client, 0, 1, discardLogger())
-	if keepalive.interval != DefaultKeepAliveInterval {
-		t.Errorf("expected default interval %v, got %v", DefaultKeepAliveInterval, keepalive.interval)
+	keepalive := NewHealthCheck(ctx, client, 0, 1, discardLogger())
+	if keepalive.interval != DefaultHealthCheckInterval {
+		t.Errorf("expected default interval %v, got %v", DefaultHealthCheckInterval, keepalive.interval)
 	}
 }
 
@@ -303,11 +303,11 @@ func TestNewKeepalive_ZeroMaxConsecutiveFailuresUsesDefault(t *testing.T) {
 			return servingResponse()
 		},
 	}
-	keepalive := NewKeepAlive(ctx, client, 20, 0, discardLogger())
-	if keepalive.maxConsecutiveFailures != DefaultKeepAliveMaxFailures {
+	keepalive := NewHealthCheck(ctx, client, 20, 0, discardLogger())
+	if keepalive.maxConsecutiveFailures != DefaultHealthCheckMaxFailures {
 		t.Errorf(
 			"expected default max consecutive failures %v, got %v",
-			DefaultKeepAliveMaxFailures,
+			DefaultHealthCheckMaxFailures,
 			keepalive.maxConsecutiveFailures,
 		)
 	}
@@ -326,7 +326,7 @@ func TestKeepAlive_Start_SendsNoUpWithoutAPrecedingDown(t *testing.T) {
 		},
 	}
 
-	keepalive := NewKeepAlive(ctx, client, 50*time.Millisecond, 3, discardLogger())
+	keepalive := NewHealthCheck(ctx, client, 50*time.Millisecond, 3, discardLogger())
 	go keepalive.Start()
 
 	select {
@@ -353,7 +353,7 @@ func TestKeepAlive_Start_GoesFatalOnTheMaximumFailureNotTheOneAfter(t *testing.T
 		},
 	}
 
-	keepalive := NewKeepAlive(ctx, client, 20*time.Millisecond, maxFailures, discardLogger())
+	keepalive := NewHealthCheck(ctx, client, 20*time.Millisecond, maxFailures, discardLogger())
 	go keepalive.Start()
 
 	select {
