@@ -3,6 +3,7 @@ package connection
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -50,10 +51,10 @@ func TestKeepAlive_Start_SuccessfulChecks(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 400*time.Millisecond)
 	defer cancel()
 
-	calls := 0
+	var calls atomic.Int32
 	client := &mockHealthClient{
 		checkFunc: func(_ context.Context, _ *grpc_health_v1.HealthCheckRequest, _ ...grpc.CallOption) (*grpc_health_v1.HealthCheckResponse, error) {
-			calls++
+			calls.Add(1)
 			return servingResponse()
 		},
 	}
@@ -62,7 +63,7 @@ func TestKeepAlive_Start_SuccessfulChecks(t *testing.T) {
 	go keepalive.Start()
 	<-ctx.Done()
 
-	if calls == 0 {
+	if calls.Load() == 0 {
 		t.Error("expected at least one health check call")
 	}
 	select {
@@ -309,5 +310,61 @@ func TestNewKeepalive_ZeroMaxConsecutiveFailuresUsesDefault(t *testing.T) {
 			DefaultKeepAliveMaxFailures,
 			keepalive.maxConsecutiveFailures,
 		)
+	}
+}
+
+// Up is an edge, not a heartbeat. With no preceding Down there is nothing to
+// recover from, and a caller that acts on every event -- as the gateway's loop
+// does -- would restart its subscribers on every successful probe.
+func TestKeepAlive_Start_SendsNoUpWithoutAPrecedingDown(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 400*time.Millisecond)
+	defer cancel()
+
+	client := &mockHealthClient{
+		checkFunc: func(_ context.Context, _ *grpc_health_v1.HealthCheckRequest, _ ...grpc.CallOption) (*grpc_health_v1.HealthCheckResponse, error) {
+			return servingResponse()
+		},
+	}
+
+	keepalive := NewKeepAlive(ctx, client, 50*time.Millisecond, 3, discardLogger())
+	go keepalive.Start()
+
+	select {
+	case transition := <-keepalive.Events():
+		t.Fatalf("Expected no transition while every probe succeeds, got %s", transition)
+	case <-ctx.Done():
+	}
+}
+
+// maxConsecutiveFailures is the number of failures that ends the process, not the
+// number it survives. An off-by-one here buys an extra interval of downtime before
+// Kubernetes gets the chance to restart the pod.
+func TestKeepAlive_Start_GoesFatalOnTheMaximumFailureNotTheOneAfter(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+
+	const maxFailures = 3
+
+	var checks atomic.Int32
+	client := &mockHealthClient{
+		checkFunc: func(_ context.Context, _ *grpc_health_v1.HealthCheckRequest, _ ...grpc.CallOption) (*grpc_health_v1.HealthCheckResponse, error) {
+			checks.Add(1)
+			return nil, errors.New("connection refused")
+		},
+	}
+
+	keepalive := NewKeepAlive(ctx, client, 20*time.Millisecond, maxFailures, discardLogger())
+	go keepalive.Start()
+
+	select {
+	case err := <-keepalive.Errors():
+		if err == nil {
+			t.Fatal("Expected a non-nil fatal error")
+		}
+		if got := checks.Load(); got != maxFailures {
+			t.Errorf("Expected the fatal error after exactly %d failed checks, got %d", maxFailures, got)
+		}
+	case <-ctx.Done():
+		t.Fatal("Expected a fatal error, got none")
 	}
 }
