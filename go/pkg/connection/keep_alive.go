@@ -9,31 +9,42 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 )
 
-// These defaults should match the defaults in the chart's values.yaml file
+// Defaults for callers that pass zero. Each consumer's chart sets its own values,
+// so these are a floor rather than the configured behaviour anywhere.
 const (
 	DefaultKeepAliveInterval    = 30 * time.Second
 	DefaultKeepAliveMaxFailures = 10
 )
 
-// HealthEvent signals a change in Octopus Server health observed by the keep-alive.
-type HealthEvent int
+// Transition is a change in what the keep-alive believes about Octopus Server's
+// health, sent once per change rather than once per probe. A caller that sees
+// Down will not see it again until an Up has been sent in between.
+type Transition int
 
 const (
-	// HealthEventDown is sent on the first health check failure.
-	// Subscribers should be cancelled and wait for HealthEventUp before restarting.
-	HealthEventDown HealthEvent = iota
+	// Down is sent on the first failed health check.
+	// Subscribers should be cancelled and wait for Up before restarting.
+	Down Transition = iota
 
-	// HealthEventUp is sent when the health check recovers after a HealthEventDown.
+	// Up is sent when health recovers after a Down.
 	// Subscribers should be restarted.
-	HealthEventUp
+	Up
 )
+
+func (t Transition) String() string {
+	if t == Up {
+		return "up"
+	}
+
+	return "down"
+}
 
 // KeepAlive sends periodic gRPC health check RPCs as application-level
 // keep-alives. This keeps connections alive through load balancers that
 // incorrectly respond to TCP-level gRPC keepalive frames.
 //
-// When health checks begin to fail it emits HealthEventDown so subscribers can
-// be cancelled. When health recovers it emits HealthEventUp so subscribers can
+// When health checks begin to fail it emits Down so subscribers can
+// be cancelled. When health recovers it emits Up so subscribers can
 // be restarted. If failures reach the configured maximum it sends a fatal error
 // to Errors() and stops, allowing the process to exit and be restarted by
 // Kubernetes.
@@ -43,7 +54,7 @@ type KeepAlive struct {
 	interval               time.Duration
 	logger                 *slog.Logger
 	fatal                  chan error
-	events                 chan HealthEvent
+	events                 chan Transition
 	maxConsecutiveFailures int
 	consecutiveFailures    int
 }
@@ -69,14 +80,14 @@ func NewKeepAlive(
 		interval:               interval,
 		logger:                 logger,
 		fatal:                  make(chan error, 1),
-		events:                 make(chan HealthEvent, 2),
+		events:                 make(chan Transition, 2),
 		maxConsecutiveFailures: maxConsecutiveFailures,
 	}
 }
 
 // Start runs the keep-alive loop until ctx is canceled or consecutive failures
-// exceed the limit. On the first failure it emits HealthEventDown; on recovery
-// it emits HealthEventUp. If max consecutive failures is reached it sends a
+// exceed the limit. On the first failure it emits Down; on recovery
+// it emits Up. If max consecutive failures is reached it sends a
 // fatal error to Errors() and stops.
 func (h *KeepAlive) Start() {
 	h.logger.Info("Starting application keep alive",
@@ -97,7 +108,7 @@ func (h *KeepAlive) Start() {
 			if err != nil || resp.GetStatus() != grpc_health_v1.HealthCheckResponse_SERVING {
 				h.consecutiveFailures++
 				if h.consecutiveFailures == 1 {
-					h.events <- HealthEventDown
+					h.events <- Down
 					h.logger.Warn("keep alive check failed - cancelling subscribers",
 						slog.Any("error", err),
 						slog.Int("consecutiveFailures", h.consecutiveFailures),
@@ -120,7 +131,7 @@ func (h *KeepAlive) Start() {
 
 			if h.consecutiveFailures > 0 {
 				h.consecutiveFailures = 0
-				h.events <- HealthEventUp
+				h.events <- Up
 				h.logger.Info("keep alive recovered - restarting subscribers")
 			} else {
 				h.logger.Debug("keep alive check succeeded")
@@ -131,7 +142,7 @@ func (h *KeepAlive) Start() {
 	}
 }
 
-func (h *KeepAlive) Events() <-chan HealthEvent {
+func (h *KeepAlive) Events() <-chan Transition {
 	return h.events
 }
 
@@ -151,7 +162,7 @@ func (h *KeepAlive) AwaitHealthRecovery(ctx context.Context) bool {
 		case <-h.fatal:
 			return false
 		case event := <-h.events:
-			if event == HealthEventUp {
+			if event == Up {
 				return true
 			}
 		}

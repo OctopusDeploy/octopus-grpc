@@ -88,8 +88,8 @@ func TestKeepAlive_Start_SendsDownEventOnFirstFailure(t *testing.T) {
 
 	select {
 	case event := <-keepalive.Events():
-		if event != HealthEventDown {
-			t.Errorf("expected HealthEventDown, got %v", event)
+		if event != Down {
+			t.Errorf("expected Down, got %v", event)
 		}
 	case <-keepalive.Errors():
 		t.Error("expected DOWN event before fatal error")
@@ -114,8 +114,8 @@ func TestKeepAlive_Start_SendsDownEventOnNotServingResponse(t *testing.T) {
 
 	select {
 	case event := <-keepalive.Events():
-		if event != HealthEventDown {
-			t.Errorf("expected HealthEventDown, got %v", event)
+		if event != Down {
+			t.Errorf("expected Down, got %v", event)
 		}
 	case <-keepalive.Errors():
 		t.Error("expected DOWN event before fatal error")
@@ -141,7 +141,7 @@ func TestKeepAlive_Start_DoesNotResendDownOnSubsequentFailures(t *testing.T) {
 	go keepalive.Start()
 
 	// Collect events until fatal
-	var events []HealthEvent
+	var events []Transition
 	for {
 		select {
 		case event := <-keepalive.Events():
@@ -150,7 +150,7 @@ func TestKeepAlive_Start_DoesNotResendDownOnSubsequentFailures(t *testing.T) {
 			// Fatal received — check collected events
 			downCount := 0
 			for _, e := range events {
-				if e == HealthEventDown {
+				if e == Down {
 					downCount++
 				}
 			}
@@ -186,8 +186,8 @@ func TestKeepAlive_Start_SendsUpEventOnRecovery(t *testing.T) {
 	// First event must be DOWN
 	select {
 	case event := <-keepalive.Events():
-		if event != HealthEventDown {
-			t.Fatalf("expected first event to be HealthEventDown, got %v", event)
+		if event != Down {
+			t.Fatalf("expected first event to be Down, got %v", event)
 		}
 	case <-ctx.Done():
 		t.Fatal("timed out waiting for DOWN event")
@@ -196,8 +196,8 @@ func TestKeepAlive_Start_SendsUpEventOnRecovery(t *testing.T) {
 	// Second event must be UP (recovery)
 	select {
 	case event := <-keepalive.Events():
-		if event != HealthEventUp {
-			t.Errorf("expected second event to be HealthEventUp, got %v", event)
+		if event != Up {
+			t.Errorf("expected second event to be Up, got %v", event)
 		}
 	case err := <-keepalive.Errors():
 		t.Errorf("unexpected fatal error: %v", err)
