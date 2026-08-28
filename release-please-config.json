@@ -1,0 +1,14 @@
+{
+  "separator": "/",
+  "packages": {
+    "go": {
+      "component": "go",
+      "include-component-in-tag": true,
+      "pull-request-title-pattern": "feat${scope}: release${component} ${version}",
+      "changelog-path": "CHANGELOG.md",
+      "bump-minor-pre-major": true,
+      "release-type": "go",
+      "versioning": "default"
+    }
+  }
+}
