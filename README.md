@@ -21,10 +21,3 @@ go get github.com/OctopusDeploy/octopus-grpc/go
 
 Releases are tagged `go/vX.Y.Z`. The prefix is not decoration: the Go module proxy only
 resolves a subdirectory module from tags named after that subdirectory.
-
-## Layout
-
-```
-go/pkg/         Packages consumers import
-go/internal/    Packages they cannot
-```
