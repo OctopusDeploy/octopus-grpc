@@ -12,7 +12,7 @@ Shared libraries for connecting to Octopus Server from the Kubernetes Monitor &a
 The module lives in a subdirectory, so its path carries that subdirectory too:
 
 ```go
-import "github.com/OctopusDeploy/octopus-grpc/go/certificate"
+import "github.com/OctopusDeploy/octopus-grpc/go/pkg/certificate"
 ```
 
 ```
@@ -21,3 +21,10 @@ go get github.com/OctopusDeploy/octopus-grpc/go
 
 Releases are tagged `go/vX.Y.Z`. The prefix is not decoration: the Go module proxy only
 resolves a subdirectory module from tags named after that subdirectory.
+
+## Layout
+
+```
+go/pkg/         Packages consumers import
+go/internal/    Packages they cannot
+```
