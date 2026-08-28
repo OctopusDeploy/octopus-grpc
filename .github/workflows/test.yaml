@@ -1,5 +1,5 @@
-name: "Tests"
-run-name: "Tests"
+name: "Go Tests"
+run-name: "Go Tests"
 
 on:
   workflow_dispatch:
