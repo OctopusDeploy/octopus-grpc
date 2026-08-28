@@ -14,7 +14,7 @@ import (
 )
 
 func TestBearerCredentials_SendMetadataTheServerCanRead(t *testing.T) {
-	received := callWith(t, nil, NewPlaintextBearerCredentials("gateway-1", "tok"))
+	received := callWith(t, nil, PlaintextBearerCredentials{ClientID: "gateway-1", Token: "tok"})
 
 	assertMetadata(t, received, "client-id", "gateway-1")
 	assertMetadata(t, received, "authorization", "Bearer tok")
@@ -44,7 +44,7 @@ func TestBearerCredentials_SendMetadataOverTLS(t *testing.T) {
 	received := callWith(
 		t,
 		&transport{server: certs.serverCreds, client: certs.clientCreds},
-		NewBearerCredentials("gateway-1", "tok"),
+		BearerCredentials{ClientID: "gateway-1", Token: "tok"},
 	)
 
 	assertMetadata(t, received, "client-id", "gateway-1")
