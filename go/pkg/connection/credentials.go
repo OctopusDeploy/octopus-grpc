@@ -12,8 +12,8 @@ var (
 	_ credentials.PerRPCCredentials = PlaintextBearerCredentials{}
 )
 
-// BearerCredentials authenticates as an Octopus Argo CD gateway: a client id
-// alongside a bearer token.
+// BearerCredentials is the auth scheme Octopus Server expects from new gRPC
+// clients: a client id alongside a bearer token.
 type BearerCredentials struct {
 	ClientID string
 	Token    string
