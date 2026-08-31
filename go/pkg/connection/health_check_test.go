@@ -47,7 +47,7 @@ func notServingResponse() (*grpc_health_v1.HealthCheckResponse, error) {
 	return &grpc_health_v1.HealthCheckResponse{Status: grpc_health_v1.HealthCheckResponse_NOT_SERVING}, nil
 }
 
-func TestKeepAlive_Start_SuccessfulChecks(t *testing.T) {
+func TestHealthCheck_Start_SuccessfulChecks(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 400*time.Millisecond)
 	defer cancel()
 
@@ -59,21 +59,21 @@ func TestKeepAlive_Start_SuccessfulChecks(t *testing.T) {
 		},
 	}
 
-	keepalive := NewHealthCheck(ctx, client, 100*time.Millisecond, 1, discardLogger())
-	go keepalive.Start()
+	healthCheck := NewHealthCheck(ctx, client, 100*time.Millisecond, 1, discardLogger())
+	go healthCheck.Start()
 	<-ctx.Done()
 
 	if calls.Load() == 0 {
 		t.Error("expected at least one health check call")
 	}
 	select {
-	case err := <-keepalive.Errors():
+	case err := <-healthCheck.Errors():
 		t.Errorf("unexpected error: %v", err)
 	default:
 	}
 }
 
-func TestKeepAlive_Start_SendsDownEventOnFirstFailure(t *testing.T) {
+func TestHealthCheck_Start_SendsDownEventOnFirstFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
@@ -84,22 +84,22 @@ func TestKeepAlive_Start_SendsDownEventOnFirstFailure(t *testing.T) {
 	}
 
 	// maxConsecutiveFailures = 10 — should not reach fatal before first DOWN event
-	keepalive := NewHealthCheck(ctx, client, 50*time.Millisecond, 10, discardLogger())
-	go keepalive.Start()
+	healthCheck := NewHealthCheck(ctx, client, 50*time.Millisecond, 10, discardLogger())
+	go healthCheck.Start()
 
 	select {
-	case event := <-keepalive.Events():
+	case event := <-healthCheck.Events():
 		if event != Down {
 			t.Errorf("expected Down, got %v", event)
 		}
-	case <-keepalive.Errors():
+	case <-healthCheck.Errors():
 		t.Error("expected DOWN event before fatal error")
 	case <-ctx.Done():
 		t.Error("timed out waiting for DOWN event")
 	}
 }
 
-func TestKeepAlive_Start_SendsDownEventOnNotServingResponse(t *testing.T) {
+func TestHealthCheck_Start_SendsDownEventOnNotServingResponse(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
@@ -110,22 +110,22 @@ func TestKeepAlive_Start_SendsDownEventOnNotServingResponse(t *testing.T) {
 	}
 
 	// maxConsecutiveFailures = 10 — should not reach fatal before first DOWN event
-	keepalive := NewHealthCheck(ctx, client, 50*time.Millisecond, 10, discardLogger())
-	go keepalive.Start()
+	healthCheck := NewHealthCheck(ctx, client, 50*time.Millisecond, 10, discardLogger())
+	go healthCheck.Start()
 
 	select {
-	case event := <-keepalive.Events():
+	case event := <-healthCheck.Events():
 		if event != Down {
 			t.Errorf("expected Down, got %v", event)
 		}
-	case <-keepalive.Errors():
+	case <-healthCheck.Errors():
 		t.Error("expected DOWN event before fatal error")
 	case <-ctx.Done():
 		t.Error("timed out waiting for DOWN event")
 	}
 }
 
-func TestKeepAlive_Start_DoesNotResendDownOnSubsequentFailures(t *testing.T) {
+func TestHealthCheck_Start_DoesNotResendDownOnSubsequentFailures(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
@@ -138,16 +138,16 @@ func TestKeepAlive_Start_DoesNotResendDownOnSubsequentFailures(t *testing.T) {
 	}
 
 	// maxConsecutiveFailures = 5, interval fast enough to get several ticks
-	keepalive := NewHealthCheck(ctx, client, 30*time.Millisecond, 5, discardLogger())
-	go keepalive.Start()
+	healthCheck := NewHealthCheck(ctx, client, 30*time.Millisecond, 5, discardLogger())
+	go healthCheck.Start()
 
 	// Collect events until fatal
 	var events []Transition
 	for {
 		select {
-		case event := <-keepalive.Events():
+		case event := <-healthCheck.Events():
 			events = append(events, event)
-		case <-keepalive.Errors():
+		case <-healthCheck.Errors():
 			// Fatal received — check collected events
 			downCount := 0
 			for _, e := range events {
@@ -166,7 +166,7 @@ func TestKeepAlive_Start_DoesNotResendDownOnSubsequentFailures(t *testing.T) {
 	}
 }
 
-func TestKeepAlive_Start_SendsUpEventOnRecovery(t *testing.T) {
+func TestHealthCheck_Start_SendsUpEventOnRecovery(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
@@ -181,12 +181,12 @@ func TestKeepAlive_Start_SendsUpEventOnRecovery(t *testing.T) {
 		},
 	}
 
-	keepalive := NewHealthCheck(ctx, client, 50*time.Millisecond, 10, discardLogger())
-	go keepalive.Start()
+	healthCheck := NewHealthCheck(ctx, client, 50*time.Millisecond, 10, discardLogger())
+	go healthCheck.Start()
 
 	// First event must be DOWN
 	select {
-	case event := <-keepalive.Events():
+	case event := <-healthCheck.Events():
 		if event != Down {
 			t.Fatalf("expected first event to be Down, got %v", event)
 		}
@@ -196,18 +196,18 @@ func TestKeepAlive_Start_SendsUpEventOnRecovery(t *testing.T) {
 
 	// Second event must be UP (recovery)
 	select {
-	case event := <-keepalive.Events():
+	case event := <-healthCheck.Events():
 		if event != Up {
 			t.Errorf("expected second event to be Up, got %v", event)
 		}
-	case err := <-keepalive.Errors():
+	case err := <-healthCheck.Errors():
 		t.Errorf("unexpected fatal error: %v", err)
 	case <-ctx.Done():
 		t.Error("timed out waiting for UP event after recovery")
 	}
 }
 
-func TestKeepAlive_Start_FatalAfterMaxConsecutiveFailures(t *testing.T) {
+func TestHealthCheck_Start_FatalAfterMaxConsecutiveFailures(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
@@ -217,11 +217,11 @@ func TestKeepAlive_Start_FatalAfterMaxConsecutiveFailures(t *testing.T) {
 		},
 	}
 
-	keepalive := NewHealthCheck(ctx, client, 50*time.Millisecond, 1, discardLogger())
-	go keepalive.Start()
+	healthCheck := NewHealthCheck(ctx, client, 50*time.Millisecond, 1, discardLogger())
+	go healthCheck.Start()
 
 	select {
-	case err := <-keepalive.Errors():
+	case err := <-healthCheck.Errors():
 		if err == nil {
 			t.Error("expected non-nil fatal error")
 		}
@@ -230,7 +230,7 @@ func TestKeepAlive_Start_FatalAfterMaxConsecutiveFailures(t *testing.T) {
 	}
 }
 
-func TestKeepAlive_Start_ResetsConsecutiveFailuresOnSuccess(t *testing.T) {
+func TestHealthCheck_Start_ResetsConsecutiveFailuresOnSuccess(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
@@ -245,20 +245,20 @@ func TestKeepAlive_Start_ResetsConsecutiveFailuresOnSuccess(t *testing.T) {
 		},
 	}
 
-	keepalive := NewHealthCheck(ctx, client, 50*time.Millisecond, 5, discardLogger())
-	go keepalive.Start()
+	healthCheck := NewHealthCheck(ctx, client, 50*time.Millisecond, 5, discardLogger())
+	go healthCheck.Start()
 
 	time.Sleep(500 * time.Millisecond)
 	cancel()
 
 	select {
-	case err := <-keepalive.Errors():
+	case err := <-healthCheck.Errors():
 		t.Errorf("unexpected fatal error after recovery: %v", err)
 	default:
 	}
 }
 
-func TestKeepAlive_Start_StopsOnContextCancellation(t *testing.T) {
+func TestHealthCheck_Start_StopsOnContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 
 	client := &mockHealthClient{
@@ -267,10 +267,10 @@ func TestKeepAlive_Start_StopsOnContextCancellation(t *testing.T) {
 		},
 	}
 
-	keepalive := NewHealthCheck(ctx, client, 100*time.Millisecond, 1, discardLogger())
+	healthCheck := NewHealthCheck(ctx, client, 100*time.Millisecond, 1, discardLogger())
 	done := make(chan struct{})
 	go func() {
-		keepalive.Start()
+		healthCheck.Start()
 		close(done)
 	}()
 
@@ -283,32 +283,32 @@ func TestKeepAlive_Start_StopsOnContextCancellation(t *testing.T) {
 	}
 }
 
-func TestNewKeepAlive_ZeroIntervalUsesDefault(t *testing.T) {
+func TestNewHealthCheck_ZeroIntervalUsesDefault(t *testing.T) {
 	ctx := t.Context()
 	client := &mockHealthClient{
 		checkFunc: func(_ context.Context, _ *grpc_health_v1.HealthCheckRequest, _ ...grpc.CallOption) (*grpc_health_v1.HealthCheckResponse, error) {
 			return servingResponse()
 		},
 	}
-	keepalive := NewHealthCheck(ctx, client, 0, 1, discardLogger())
-	if keepalive.interval != DefaultHealthCheckInterval {
-		t.Errorf("expected default interval %v, got %v", DefaultHealthCheckInterval, keepalive.interval)
+	healthCheck := NewHealthCheck(ctx, client, 0, 1, discardLogger())
+	if healthCheck.interval != DefaultHealthCheckInterval {
+		t.Errorf("expected default interval %v, got %v", DefaultHealthCheckInterval, healthCheck.interval)
 	}
 }
 
-func TestNewKeepalive_ZeroMaxConsecutiveFailuresUsesDefault(t *testing.T) {
+func TestNewHealthCheck_ZeroMaxConsecutiveFailuresUsesDefault(t *testing.T) {
 	ctx := t.Context()
 	client := &mockHealthClient{
 		checkFunc: func(_ context.Context, _ *grpc_health_v1.HealthCheckRequest, _ ...grpc.CallOption) (*grpc_health_v1.HealthCheckResponse, error) {
 			return servingResponse()
 		},
 	}
-	keepalive := NewHealthCheck(ctx, client, 20, 0, discardLogger())
-	if keepalive.maxConsecutiveFailures != DefaultHealthCheckMaxFailures {
+	healthCheck := NewHealthCheck(ctx, client, 20, 0, discardLogger())
+	if healthCheck.maxConsecutiveFailures != DefaultHealthCheckMaxFailures {
 		t.Errorf(
 			"expected default max consecutive failures %v, got %v",
 			DefaultHealthCheckMaxFailures,
-			keepalive.maxConsecutiveFailures,
+			healthCheck.maxConsecutiveFailures,
 		)
 	}
 }
@@ -316,7 +316,7 @@ func TestNewKeepalive_ZeroMaxConsecutiveFailuresUsesDefault(t *testing.T) {
 // Up is an edge, not a heartbeat. With no preceding Down there is nothing to
 // recover from, and a caller that acts on every event -- as the gateway's loop
 // does -- would restart its subscribers on every successful probe.
-func TestKeepAlive_Start_SendsNoUpWithoutAPrecedingDown(t *testing.T) {
+func TestHealthCheck_Start_SendsNoUpWithoutAPrecedingDown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 400*time.Millisecond)
 	defer cancel()
 
@@ -326,11 +326,11 @@ func TestKeepAlive_Start_SendsNoUpWithoutAPrecedingDown(t *testing.T) {
 		},
 	}
 
-	keepalive := NewHealthCheck(ctx, client, 50*time.Millisecond, 3, discardLogger())
-	go keepalive.Start()
+	healthCheck := NewHealthCheck(ctx, client, 50*time.Millisecond, 3, discardLogger())
+	go healthCheck.Start()
 
 	select {
-	case transition := <-keepalive.Events():
+	case transition := <-healthCheck.Events():
 		t.Fatalf("Expected no transition while every probe succeeds, got %s", transition)
 	case <-ctx.Done():
 	}
@@ -339,7 +339,7 @@ func TestKeepAlive_Start_SendsNoUpWithoutAPrecedingDown(t *testing.T) {
 // maxConsecutiveFailures is the number of failures that ends the process, not the
 // number it survives. An off-by-one here buys an extra interval of downtime before
 // Kubernetes gets the chance to restart the pod.
-func TestKeepAlive_Start_GoesFatalOnTheMaximumFailureNotTheOneAfter(t *testing.T) {
+func TestHealthCheck_Start_GoesFatalOnTheMaximumFailureNotTheOneAfter(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
@@ -353,11 +353,11 @@ func TestKeepAlive_Start_GoesFatalOnTheMaximumFailureNotTheOneAfter(t *testing.T
 		},
 	}
 
-	keepalive := NewHealthCheck(ctx, client, 20*time.Millisecond, maxFailures, discardLogger())
-	go keepalive.Start()
+	healthCheck := NewHealthCheck(ctx, client, 20*time.Millisecond, maxFailures, discardLogger())
+	go healthCheck.Start()
 
 	select {
-	case err := <-keepalive.Errors():
+	case err := <-healthCheck.Errors():
 		if err == nil {
 			t.Fatal("Expected a non-nil fatal error")
 		}
