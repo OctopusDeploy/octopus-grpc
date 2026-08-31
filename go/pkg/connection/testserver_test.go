@@ -26,7 +26,6 @@ import (
 // thumbprint the tests assert against is the real one for the cert in play.
 type testTLS struct {
 	serverCreds credentials.TransportCredentials
-	clientCreds credentials.TransportCredentials
 	roots       *x509.CertPool
 	thumbprint  string
 }
@@ -116,8 +115,7 @@ func selfSignedTLS(t *testing.T) testTLS {
 		serverCreds: credentials.NewTLS(&tls.Config{
 			Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}},
 		}),
-		clientCreds: credentials.NewTLS(&tls.Config{RootCAs: roots, ServerName: "127.0.0.1"}),
-		roots:       roots,
-		thumbprint:  strings.ToUpper(hex.EncodeToString(sum[:])),
+		roots:      roots,
+		thumbprint: strings.ToUpper(hex.EncodeToString(sum[:])),
 	}
 }
