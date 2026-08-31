@@ -1,0 +1,12 @@
+{
+  "loadBalancingConfig": [{ "round_robin": {} }],
+  "healthCheckConfig": {
+    "serviceName": ""
+  },
+  "methodConfig": [
+    {
+      "name": [{}],
+      "waitForReady": true
+    }
+  ]
+}
