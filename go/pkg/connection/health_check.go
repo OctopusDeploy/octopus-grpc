@@ -50,7 +50,7 @@ func (t Transition) String() string {
 // Kubernetes.
 type HealthCheck struct {
 	ctx                    context.Context
-	client                 grpc_health_v1.HealthClient
+	connection             Connection
 	interval               time.Duration
 	logger                 *slog.Logger
 	fatal                  chan error
@@ -61,7 +61,7 @@ type HealthCheck struct {
 
 func NewHealthCheck(
 	ctx context.Context,
-	client grpc_health_v1.HealthClient,
+	connection Connection,
 	interval time.Duration,
 	maxConsecutiveFailures int,
 	logger *slog.Logger,
@@ -76,7 +76,7 @@ func NewHealthCheck(
 
 	return &HealthCheck{
 		ctx:                    ctx,
-		client:                 client,
+		connection:             connection,
 		interval:               interval,
 		logger:                 logger,
 		fatal:                  make(chan error, 1),
@@ -102,7 +102,10 @@ func (h *HealthCheck) Start() {
 		select {
 		case <-ticker.C:
 			checkCtx, cancel := context.WithTimeout(h.ctx, h.interval)
-			resp, err := h.client.Check(checkCtx, &grpc_health_v1.HealthCheckRequest{})
+			resp, err := grpc_health_v1.NewHealthClient(h.connection.Get()).Check(
+				checkCtx,
+				&grpc_health_v1.HealthCheckRequest{},
+			)
 			cancel()
 
 			if err != nil || resp.GetStatus() != grpc_health_v1.HealthCheckResponse_SERVING {
@@ -126,6 +129,15 @@ func (h *HealthCheck) Start() {
 					)
 					return
 				}
+
+				// Replace the client before the next probe rather than after it. The
+				// address the current client resolved to may be the one that went
+				// away, and probing it again would only keep confirming that.
+				if rebuildErr := h.connection.Rebuild(); rebuildErr != nil {
+					h.logger.Warn("Continuing on the existing connection",
+						slog.Any("error", rebuildErr))
+				}
+
 				continue
 			}
 

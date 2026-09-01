@@ -2,358 +2,160 @@ package connection
 
 import (
 	"context"
-	"errors"
-	"sync/atomic"
+	"strings"
 	"testing"
 	"time"
-
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/health/grpc_health_v1"
 )
 
-type mockHealthClient struct {
-	checkFunc func(ctx context.Context, in *grpc_health_v1.HealthCheckRequest, opts ...grpc.CallOption) (*grpc_health_v1.HealthCheckResponse, error)
-}
-
-func (m *mockHealthClient) Check(
-	ctx context.Context,
-	in *grpc_health_v1.HealthCheckRequest,
-	opts ...grpc.CallOption,
-) (*grpc_health_v1.HealthCheckResponse, error) {
-	return m.checkFunc(ctx, in, opts...)
-}
-
-func (m *mockHealthClient) List(
-	_ context.Context,
-	_ *grpc_health_v1.HealthListRequest,
-	_ ...grpc.CallOption,
-) (*grpc_health_v1.HealthListResponse, error) {
-	return nil, nil
-}
-
-func (m *mockHealthClient) Watch(
-	_ context.Context,
-	_ *grpc_health_v1.HealthCheckRequest,
-	_ ...grpc.CallOption,
-) (grpc_health_v1.Health_WatchClient, error) {
-	return nil, nil
-}
-
-func servingResponse() (*grpc_health_v1.HealthCheckResponse, error) {
-	return &grpc_health_v1.HealthCheckResponse{Status: grpc_health_v1.HealthCheckResponse_SERVING}, nil
-}
-
-func notServingResponse() (*grpc_health_v1.HealthCheckResponse, error) {
-	return &grpc_health_v1.HealthCheckResponse{Status: grpc_health_v1.HealthCheckResponse_NOT_SERVING}, nil
-}
-
-func TestHealthCheck_Start_SuccessfulChecks(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 400*time.Millisecond)
-	defer cancel()
-
-	var calls atomic.Int32
-	client := &mockHealthClient{
-		checkFunc: func(_ context.Context, _ *grpc_health_v1.HealthCheckRequest, _ ...grpc.CallOption) (*grpc_health_v1.HealthCheckResponse, error) {
-			calls.Add(1)
-			return servingResponse()
-		},
-	}
-
-	healthCheck := NewHealthCheck(ctx, client, 100*time.Millisecond, 1, discardLogger())
-	go healthCheck.Start()
-	<-ctx.Done()
-
-	if calls.Load() == 0 {
-		t.Error("expected at least one health check call")
-	}
-	select {
-	case err := <-healthCheck.Errors():
-		t.Errorf("unexpected error: %v", err)
-	default:
-	}
-}
-
-func TestHealthCheck_Start_SendsDownEventOnFirstFailure(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-	defer cancel()
-
-	client := &mockHealthClient{
-		checkFunc: func(_ context.Context, _ *grpc_health_v1.HealthCheckRequest, _ ...grpc.CallOption) (*grpc_health_v1.HealthCheckResponse, error) {
-			return nil, errors.New("connection refused")
-		},
-	}
-
-	// maxConsecutiveFailures = 10 — should not reach fatal before first DOWN event
-	healthCheck := NewHealthCheck(ctx, client, 50*time.Millisecond, 10, discardLogger())
-	go healthCheck.Start()
-
-	select {
-	case event := <-healthCheck.Events():
-		if event != Down {
-			t.Errorf("expected Down, got %v", event)
-		}
-	case <-healthCheck.Errors():
-		t.Error("expected DOWN event before fatal error")
-	case <-ctx.Done():
-		t.Error("timed out waiting for DOWN event")
-	}
-}
-
-func TestHealthCheck_Start_SendsDownEventOnNotServingResponse(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-	defer cancel()
-
-	client := &mockHealthClient{
-		checkFunc: func(_ context.Context, _ *grpc_health_v1.HealthCheckRequest, _ ...grpc.CallOption) (*grpc_health_v1.HealthCheckResponse, error) {
-			return notServingResponse()
-		},
-	}
-
-	// maxConsecutiveFailures = 10 — should not reach fatal before first DOWN event
-	healthCheck := NewHealthCheck(ctx, client, 50*time.Millisecond, 10, discardLogger())
-	go healthCheck.Start()
-
-	select {
-	case event := <-healthCheck.Events():
-		if event != Down {
-			t.Errorf("expected Down, got %v", event)
-		}
-	case <-healthCheck.Errors():
-		t.Error("expected DOWN event before fatal error")
-	case <-ctx.Done():
-		t.Error("timed out waiting for DOWN event")
-	}
-}
-
-func TestHealthCheck_Start_DoesNotResendDownOnSubsequentFailures(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-	defer cancel()
-
-	calls := 0
-	client := &mockHealthClient{
-		checkFunc: func(_ context.Context, _ *grpc_health_v1.HealthCheckRequest, _ ...grpc.CallOption) (*grpc_health_v1.HealthCheckResponse, error) {
-			calls++
-			return nil, errors.New("connection refused")
-		},
-	}
-
-	// maxConsecutiveFailures = 5, interval fast enough to get several ticks
-	healthCheck := NewHealthCheck(ctx, client, 30*time.Millisecond, 5, discardLogger())
-	go healthCheck.Start()
-
-	// Collect events until fatal
-	var events []Transition
-	for {
-		select {
-		case event := <-healthCheck.Events():
-			events = append(events, event)
-		case <-healthCheck.Errors():
-			// Fatal received — check collected events
-			downCount := 0
-			for _, e := range events {
-				if e == Down {
-					downCount++
-				}
-			}
-			if downCount != 1 {
-				t.Errorf("expected exactly 1 DOWN event, got %d", downCount)
-			}
-			return
-		case <-ctx.Done():
-			t.Error("timed out")
-			return
-		}
-	}
-}
-
-func TestHealthCheck_Start_SendsUpEventOnRecovery(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-	defer cancel()
-
-	calls := 0
-	client := &mockHealthClient{
-		checkFunc: func(_ context.Context, _ *grpc_health_v1.HealthCheckRequest, _ ...grpc.CallOption) (*grpc_health_v1.HealthCheckResponse, error) {
-			calls++
-			if calls <= 2 {
-				return nil, errors.New("transient error")
-			}
-			return servingResponse()
-		},
-	}
-
-	healthCheck := NewHealthCheck(ctx, client, 50*time.Millisecond, 10, discardLogger())
-	go healthCheck.Start()
-
-	// First event must be DOWN
-	select {
-	case event := <-healthCheck.Events():
-		if event != Down {
-			t.Fatalf("expected first event to be Down, got %v", event)
-		}
-	case <-ctx.Done():
-		t.Fatal("timed out waiting for DOWN event")
-	}
-
-	// Second event must be UP (recovery)
-	select {
-	case event := <-healthCheck.Events():
-		if event != Up {
-			t.Errorf("expected second event to be Up, got %v", event)
-		}
-	case err := <-healthCheck.Errors():
-		t.Errorf("unexpected fatal error: %v", err)
-	case <-ctx.Done():
-		t.Error("timed out waiting for UP event after recovery")
-	}
-}
-
-func TestHealthCheck_Start_FatalAfterMaxConsecutiveFailures(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-	defer cancel()
-
-	client := &mockHealthClient{
-		checkFunc: func(_ context.Context, _ *grpc_health_v1.HealthCheckRequest, _ ...grpc.CallOption) (*grpc_health_v1.HealthCheckResponse, error) {
-			return nil, errors.New("connection refused")
-		},
-	}
-
-	healthCheck := NewHealthCheck(ctx, client, 50*time.Millisecond, 1, discardLogger())
-	go healthCheck.Start()
-
-	select {
-	case err := <-healthCheck.Errors():
-		if err == nil {
-			t.Error("expected non-nil fatal error")
-		}
-	case <-ctx.Done():
-		t.Error("timed out waiting for fatal error after consecutive failures")
-	}
-}
-
-func TestHealthCheck_Start_ResetsConsecutiveFailuresOnSuccess(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-	defer cancel()
-
-	calls := 0
-	client := &mockHealthClient{
-		checkFunc: func(_ context.Context, _ *grpc_health_v1.HealthCheckRequest, _ ...grpc.CallOption) (*grpc_health_v1.HealthCheckResponse, error) {
-			calls++
-			if calls <= 2 {
-				return nil, errors.New("transient error")
-			}
-			return servingResponse()
-		},
-	}
-
-	healthCheck := NewHealthCheck(ctx, client, 50*time.Millisecond, 5, discardLogger())
-	go healthCheck.Start()
-
-	time.Sleep(500 * time.Millisecond)
-	cancel()
-
-	select {
-	case err := <-healthCheck.Errors():
-		t.Errorf("unexpected fatal error after recovery: %v", err)
-	default:
-	}
-}
-
-func TestHealthCheck_Start_StopsOnContextCancellation(t *testing.T) {
+func TestHealthCheck_Start_ProbesWhileTheServerIsHealthy(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
-
-	client := &mockHealthClient{
-		checkFunc: func(_ context.Context, _ *grpc_health_v1.HealthCheckRequest, _ ...grpc.CallOption) (*grpc_health_v1.HealthCheckResponse, error) {
-			return servingResponse()
-		},
-	}
-
-	healthCheck := NewHealthCheck(ctx, client, 100*time.Millisecond, 1, discardLogger())
-	done := make(chan struct{})
-	go func() {
-		healthCheck.Start()
-		close(done)
-	}()
-
-	cancel()
-	select {
-	case <-done:
-		// Start() returned — success
-	case <-time.After(500 * time.Millisecond):
-		t.Error("Start() did not return after context cancellation")
-	}
-}
-
-func TestNewHealthCheck_ZeroIntervalUsesDefault(t *testing.T) {
-	ctx := t.Context()
-	client := &mockHealthClient{
-		checkFunc: func(_ context.Context, _ *grpc_health_v1.HealthCheckRequest, _ ...grpc.CallOption) (*grpc_health_v1.HealthCheckResponse, error) {
-			return servingResponse()
-		},
-	}
-	healthCheck := NewHealthCheck(ctx, client, 0, 1, discardLogger())
-	if healthCheck.interval != DefaultHealthCheckInterval {
-		t.Errorf("expected default interval %v, got %v", DefaultHealthCheckInterval, healthCheck.interval)
-	}
-}
-
-func TestNewHealthCheck_ZeroMaxConsecutiveFailuresUsesDefault(t *testing.T) {
-	ctx := t.Context()
-	client := &mockHealthClient{
-		checkFunc: func(_ context.Context, _ *grpc_health_v1.HealthCheckRequest, _ ...grpc.CallOption) (*grpc_health_v1.HealthCheckResponse, error) {
-			return servingResponse()
-		},
-	}
-	healthCheck := NewHealthCheck(ctx, client, 20, 0, discardLogger())
-	if healthCheck.maxConsecutiveFailures != DefaultHealthCheckMaxFailures {
-		t.Errorf(
-			"expected default max consecutive failures %v, got %v",
-			DefaultHealthCheckMaxFailures,
-			healthCheck.maxConsecutiveFailures,
-		)
-	}
-}
-
-// Up is an edge, not a heartbeat. With no preceding Down there is nothing to
-// recover from, and a caller that acts on every event -- as the gateway's loop
-// does -- would restart its subscribers on every successful probe.
-func TestHealthCheck_Start_SendsNoUpWithoutAPrecedingDown(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 400*time.Millisecond)
 	defer cancel()
 
-	client := &mockHealthClient{
-		checkFunc: func(_ context.Context, _ *grpc_health_v1.HealthCheckRequest, _ ...grpc.CallOption) (*grpc_health_v1.HealthCheckResponse, error) {
-			return servingResponse()
-		},
-	}
+	connection := newTestConnection(t)
+	go NewHealthCheck(ctx, connection, 50*time.Millisecond, 100, discardLogger()).Start()
+	time.Sleep(300 * time.Millisecond)
 
-	healthCheck := NewHealthCheck(ctx, client, 50*time.Millisecond, 3, discardLogger())
+	if connection.checks.Load() == 0 {
+		t.Error("Expected at least one health check to reach the server")
+	}
+}
+
+func TestHealthCheck_Start_SendsDownOnTheFirstFailedProbe(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+
+	connection := newTestConnection(t)
+	healthCheck := NewHealthCheck(ctx, connection, 20*time.Millisecond, 100, discardLogger())
+	connection.serving(false)
+	go healthCheck.Start()
+
+	awaitTransition(t, ctx, healthCheck, Down)
+}
+
+// A server answering NOT_SERVING is reachable but unhealthy. That is a failed
+// probe as much as a refused connection is.
+func TestHealthCheck_Start_TreatsAnUnreachableServerAsAFailureToo(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+
+	connection := newTestConnection(t)
+	healthCheck := NewHealthCheck(ctx, connection, 20*time.Millisecond, 100, discardLogger())
+	connection.unreachable(t)
+	go healthCheck.Start()
+
+	awaitTransition(t, ctx, healthCheck, Down)
+}
+
+// Down is an edge. A caller cancels its subscribers once on Down, so repeating it
+// on every subsequent failed probe would have it cancelling work it had already
+// stopped.
+func TestHealthCheck_Start_DoesNotRepeatDownWhileFailuresContinue(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+
+	connection := newTestConnection(t)
+	healthCheck := NewHealthCheck(ctx, connection, 20*time.Millisecond, 100, discardLogger())
+	connection.serving(false)
+	go healthCheck.Start()
+
+	awaitTransition(t, ctx, healthCheck, Down)
+
+	select {
+	case transition := <-healthCheck.Events():
+		t.Errorf("Expected no further transition while failures continue, got %s", transition)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestHealthCheck_Start_SendsUpWhenTheServerRecovers(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	connection := newTestConnection(t)
+	healthCheck := NewHealthCheck(ctx, connection, 20*time.Millisecond, 100, discardLogger())
+	connection.serving(false)
+	go healthCheck.Start()
+
+	awaitTransition(t, ctx, healthCheck, Down)
+	connection.serving(true)
+	awaitTransition(t, ctx, healthCheck, Up)
+}
+
+// Up is an edge too: with no preceding Down there is nothing to recover from, and
+// a caller acting on every event would restart its subscribers on every probe.
+func TestHealthCheck_Start_SendsNoUpWithoutAPrecedingDown(t *testing.T) {
+	// Cancelled after the assertion window, not as part of it. Probe contexts derive
+	// from this one, so a deadline expiring mid-probe fails that probe and shows up
+	// as a transition the server never caused.
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	connection := newTestConnection(t)
+	healthCheck := NewHealthCheck(ctx, connection, 50*time.Millisecond, 100, discardLogger())
 	go healthCheck.Start()
 
 	select {
 	case transition := <-healthCheck.Events():
 		t.Fatalf("Expected no transition while every probe succeeds, got %s", transition)
-	case <-ctx.Done():
+	case <-time.After(400 * time.Millisecond):
 	}
 }
 
-// maxConsecutiveFailures is the number of failures that ends the process, not the
-// number it survives. An off-by-one here buys an extra interval of downtime before
-// Kubernetes gets the chance to restart the pod.
-func TestHealthCheck_Start_GoesFatalOnTheMaximumFailureNotTheOneAfter(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+// A recovery has to zero the failure count, not just report Up. Counting probes
+// rather than timing them keeps this deterministic: after recovering, giving up
+// must take a whole limit's worth of failures again, so at least that many probes
+// have to reach the server.
+func TestHealthCheck_Start_ResetsTheFailureCountOnRecovery(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	const maxFailures = 8
+
+	connection := newTestConnection(t)
+	connection.awaitReady(t)
+	healthCheck := NewHealthCheck(ctx, connection, 20*time.Millisecond, maxFailures, discardLogger())
+	go healthCheck.Start()
+
+	// Accumulate some failures, but stop short of the limit.
+	connection.serving(false)
+	awaitTransition(t, ctx, healthCheck, Down)
+
+	before := connection.checks.Load()
+	if !eventually(2*time.Second, func() bool { return connection.checks.Load() >= before+5 }) {
+		t.Fatal("Expected the probe loop to keep failing")
+	}
+
+	connection.serving(true)
+	awaitTransition(t, ctx, healthCheck, Up)
+	atRecovery := connection.checks.Load()
+
+	connection.serving(false)
+
+	select {
+	case <-healthCheck.Errors():
+		if since := connection.checks.Load() - atRecovery; since < maxFailures {
+			t.Errorf(
+				"Expected %d failures after recovery before giving up, it gave up after %d probes",
+				maxFailures, since,
+			)
+		}
+	case <-ctx.Done():
+		t.Fatal("Expected it to give up eventually, it did not")
+	}
+}
+
+// maxConsecutiveFailures is the failure that ends the process, not the last one it
+// survives. An off-by-one costs an extra interval of downtime before Kubernetes
+// gets the chance to restart the pod.
+func TestHealthCheck_Start_GivesUpOnTheMaximumFailureNotTheOneAfter(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	const maxFailures = 3
 
-	var checks atomic.Int32
-	client := &mockHealthClient{
-		checkFunc: func(_ context.Context, _ *grpc_health_v1.HealthCheckRequest, _ ...grpc.CallOption) (*grpc_health_v1.HealthCheckResponse, error) {
-			checks.Add(1)
-			return nil, errors.New("connection refused")
-		},
-	}
-
-	healthCheck := NewHealthCheck(ctx, client, 20*time.Millisecond, maxFailures, discardLogger())
+	connection := newTestConnection(t)
+	connection.unreachable(t)
+	healthCheck := NewHealthCheck(ctx, connection, 20*time.Millisecond, maxFailures, discardLogger())
 	go healthCheck.Start()
 
 	select {
@@ -361,10 +163,119 @@ func TestHealthCheck_Start_GoesFatalOnTheMaximumFailureNotTheOneAfter(t *testing
 		if err == nil {
 			t.Fatal("Expected a non-nil fatal error")
 		}
-		if got := checks.Load(); got != maxFailures {
-			t.Errorf("Expected the fatal error after exactly %d failed checks, got %d", maxFailures, got)
+		if !strings.Contains(err.Error(), "3 consecutive failures") {
+			t.Errorf("Expected the error to name the failure count, got %v", err)
 		}
 	case <-ctx.Done():
 		t.Fatal("Expected a fatal error, got none")
 	}
+}
+
+func TestHealthCheck_Start_StopsWhenItsContextIsCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+
+	connection := newTestConnection(t)
+	healthCheck := NewHealthCheck(ctx, connection, 20*time.Millisecond, 100, discardLogger())
+
+	stopped := make(chan struct{})
+	go func() {
+		healthCheck.Start()
+		close(stopped)
+	}()
+
+	cancel()
+
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Expected Start to return once its context was cancelled")
+	}
+}
+
+// The reason Connection exists: reconnecting cannot fix an instance that has
+// moved, because a client only re-resolves its target when it is rebuilt. So a
+// failed probe has to replace the client, not just count.
+func TestHealthCheck_Start_ReplacesTheClientAfterAFailedProbe(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+
+	connection := newTestConnection(t)
+	connection.serving(false)
+	go NewHealthCheck(ctx, connection, 20*time.Millisecond, 100, discardLogger()).Start()
+
+	if !eventually(2*time.Second, func() bool { return connection.rebuilds.Load() >= 3 }) {
+		t.Errorf("Expected repeated failures to keep replacing the client, saw %d replacements",
+			connection.rebuilds.Load())
+	}
+}
+
+func TestHealthCheck_Start_DoesNotReplaceTheClientWhileProbesSucceed(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	connection := newTestConnection(t)
+	go NewHealthCheck(ctx, connection, 50*time.Millisecond, 100, discardLogger()).Start()
+	time.Sleep(300 * time.Millisecond)
+
+	if got := connection.rebuilds.Load(); got != 0 {
+		t.Errorf("Expected no replacements while the server answers, got %d", got)
+	}
+}
+
+// A failed replacement leaves the existing client in place, so the loop must carry
+// on and eventually give up properly rather than stopping where it is.
+func TestHealthCheck_Start_KeepsGoingWhenAReplacementFails(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	connection := newTestConnection(t)
+	connection.rebuildErr = errUnreachable
+	connection.unreachable(t)
+	healthCheck := NewHealthCheck(ctx, connection, 20*time.Millisecond, 3, discardLogger())
+	go healthCheck.Start()
+
+	select {
+	case err := <-healthCheck.Errors():
+		if err == nil {
+			t.Fatal("Expected a non-nil fatal error")
+		}
+	case <-ctx.Done():
+		t.Fatal("Expected the loop to reach its failure limit despite the replacements failing")
+	}
+}
+
+func TestNewHealthCheck_FallsBackToDefaultsForZeroValues(t *testing.T) {
+	healthCheck := NewHealthCheck(t.Context(), newTestConnection(t), 0, 0, discardLogger())
+
+	if healthCheck.interval != DefaultHealthCheckInterval {
+		t.Errorf("Expected the default interval, got %s", healthCheck.interval)
+	}
+	if healthCheck.maxConsecutiveFailures != DefaultHealthCheckMaxFailures {
+		t.Errorf("Expected the default failure limit, got %d", healthCheck.maxConsecutiveFailures)
+	}
+}
+
+func awaitTransition(t *testing.T, ctx context.Context, healthCheck *HealthCheck, want Transition) {
+	t.Helper()
+
+	select {
+	case got := <-healthCheck.Events():
+		if got != want {
+			t.Fatalf("Expected transition %s, got %s", want, got)
+		}
+	case <-ctx.Done():
+		t.Fatalf("Expected transition %s, got none", want)
+	}
+}
+
+func eventually(within time.Duration, condition func() bool) bool {
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	return condition()
 }
