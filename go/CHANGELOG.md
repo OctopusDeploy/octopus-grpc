@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/OctopusDeploy/octopus-grpc/compare/go/v0.2.0...go/v0.3.0) (2026-09-01)
+
+
+### Features
+
+* move the application health check into the connection package ([#7](https://github.com/OctopusDeploy/octopus-grpc/issues/7)) ([2f5ad68](https://github.com/OctopusDeploy/octopus-grpc/commit/2f5ad682bc09ecbdc0aceefc248e1e429941a6d4))
+
 ## [0.2.0](https://github.com/OctopusDeploy/octopus-grpc/compare/go/v0.1.0...go/v0.2.0) (2026-08-31)
 
 
