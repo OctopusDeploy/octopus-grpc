@@ -21,29 +21,35 @@ func TestHealthCheck_Start_ProbesWhileTheServerIsHealthy(t *testing.T) {
 }
 
 func TestHealthCheck_Start_SendsDownOnTheFirstFailedProbe(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
-	defer cancel()
+	// A server answering NOT_SERVING is reachable but unhealthy. That is a failed
+	// probe as much as a refused connection is.
+	tests := []struct {
+		name string
+		fail func(*testing.T, *testConnection)
+	}{
+		{
+			name: "the server answers that it is not serving",
+			fail: func(_ *testing.T, c *testConnection) { c.serving(false) },
+		},
+		{
+			name: "the server cannot be reached at all",
+			fail: func(t *testing.T, c *testConnection) { c.unreachable(t) },
+		},
+	}
 
-	connection := newTestConnection(t)
-	healthCheck := NewHealthCheck(ctx, connection, 20*time.Millisecond, 100, discardLogger())
-	connection.serving(false)
-	go healthCheck.Start()
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
 
-	awaitTransition(t, ctx, healthCheck, Down)
-}
+			connection := newTestConnection(t)
+			healthCheck := NewHealthCheck(ctx, connection, 20*time.Millisecond, 100, discardLogger())
+			test.fail(t, connection)
+			go healthCheck.Start()
 
-// A server answering NOT_SERVING is reachable but unhealthy. That is a failed
-// probe as much as a refused connection is.
-func TestHealthCheck_Start_TreatsAnUnreachableServerAsAFailureToo(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
-	defer cancel()
-
-	connection := newTestConnection(t)
-	healthCheck := NewHealthCheck(ctx, connection, 20*time.Millisecond, 100, discardLogger())
-	connection.unreachable(t)
-	go healthCheck.Start()
-
-	awaitTransition(t, ctx, healthCheck, Down)
+			awaitTransition(t, ctx, healthCheck, Down)
+		})
+	}
 }
 
 // Down is an edge. A caller cancels its subscribers once on Down, so repeating it
