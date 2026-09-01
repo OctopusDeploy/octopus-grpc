@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/OctopusDeploy/octopus-grpc/compare/go/v0.3.0...go/v0.4.0) (2026-09-01)
+
+
+### Features
+
+* Rebuild the connection on an outage to pick up any DNS changes ([#9](https://github.com/OctopusDeploy/octopus-grpc/issues/9)) ([742e95e](https://github.com/OctopusDeploy/octopus-grpc/commit/742e95e2bfe684445c4d323367af38c34070b953))
+
 ## [0.3.0](https://github.com/OctopusDeploy/octopus-grpc/compare/go/v0.2.0...go/v0.3.0) (2026-09-01)
 
 
