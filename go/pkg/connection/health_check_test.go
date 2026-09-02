@@ -298,6 +298,43 @@ func TestNewHealthCheck_RaisesAMaximumIntervalBelowTheInterval(t *testing.T) {
 	}
 }
 
+// A backed-off interval that reached past the boundary would throw away the last
+// chance to recover and hold the fatal error back by a whole interval. These
+// settings are deliberately misaligned: doubling alone would probe at 0, 200,
+// 600 and 1400ms, giving up 400ms late.
+func TestHealthCheck_Start_TakesALastProbeOnTheGiveUpBoundary(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	const giveUpAfter = time.Second
+
+	cfg := HealthCheckConfig{
+		Interval:    100 * time.Millisecond,
+		MaxInterval: 800 * time.Millisecond,
+		GiveUpAfter: giveUpAfter,
+	}
+
+	connection := newTestConnection(t)
+	connection.unreachable(t)
+	healthCheck := NewHealthCheck(ctx, connection, cfg, discardLogger())
+
+	started := time.Now()
+	go healthCheck.Start()
+
+	select {
+	case <-healthCheck.Errors():
+		lasted := time.Since(started)
+		if lasted < giveUpAfter {
+			t.Errorf("Expected it to tolerate the outage for %s, it gave up after %s", giveUpAfter, lasted)
+		}
+		if lasted > giveUpAfter+cfg.MaxInterval/2 {
+			t.Errorf("Expected it to give up on the boundary, it waited out a backed-off interval: %s", lasted)
+		}
+	case <-ctx.Done():
+		t.Fatal("Expected a fatal error, got none")
+	}
+}
+
 // testConfig pins the maximum interval to the interval, so a test that drives
 // repeated failures keeps probing at a rate it can assert against. Backing off is
 // covered on its own.

@@ -37,8 +37,9 @@ type HealthCheckConfig struct {
 	// GiveUpAfter is how long an outage may last before the keep-alive reports a
 	// fatal error and stops, leaving the process to exit and be restarted.
 	//
-	// It is measured from the first failed probe and checked on each subsequent
-	// one, so backing off can overshoot it by up to MaxInterval.
+	// It is measured from the first failed probe. Backing off never waits past
+	// the boundary, so a last probe lands on it and giving up overshoots only by
+	// that probe's own latency.
 	GiveUpAfter time.Duration
 }
 
@@ -237,9 +238,19 @@ func (h *HealthCheck) recordFailure(err error) bool {
 		h.logger.Warn("Continuing on the existing connection", slog.Any("error", rebuildErr))
 	}
 
-	h.interval = min(h.interval*2, h.cfg.MaxInterval)
+	h.interval = h.nextInterval()
 
 	return true
+}
+
+// nextInterval doubles the gap up to MaxInterval, but never reaches past the
+// give-up boundary. Waiting a whole backed-off interval over it would throw away
+// the last chance to recover and hold the fatal error back by minutes.
+func (h *HealthCheck) nextInterval() time.Duration {
+	backedOff := min(h.interval*2, h.cfg.MaxInterval)
+	remaining := time.Until(h.outageStart.Add(h.cfg.GiveUpAfter))
+
+	return min(backedOff, remaining)
 }
 
 func (h *HealthCheck) recordSuccess() {
