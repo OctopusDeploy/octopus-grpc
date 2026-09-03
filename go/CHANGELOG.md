@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/OctopusDeploy/octopus-grpc/compare/go/v0.4.0...go/v0.5.0) (2026-09-03)
+
+
+### Features
+
+* back off the keep-alive on a duration, and classify errors in one place ([#13](https://github.com/OctopusDeploy/octopus-grpc/issues/13)) ([a128a62](https://github.com/OctopusDeploy/octopus-grpc/commit/a128a6299291c0c80fed6fec3c6151f3701cdd69))
+
 ## [0.4.0](https://github.com/OctopusDeploy/octopus-grpc/compare/go/v0.3.0...go/v0.4.0) (2026-09-01)
 
 
