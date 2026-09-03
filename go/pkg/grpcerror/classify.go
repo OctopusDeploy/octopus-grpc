@@ -20,16 +20,13 @@ import (
 type Action int
 
 const (
-	// Retry means reconnect and carry on. The stream broke or Octopus Server is
-	// not answering, and neither says the work itself was wrong.
+	// Retry means reconnect and carry on.
 	Retry Action = iota
 
 	// Stop means end this stream and leave it ended, without reporting an error.
-	// Either something asked for it to stop, or the server does not offer it.
 	Stop
 
-	// Fatal means report the error and let the process exit. Nothing the caller
-	// can do will help, so being restarted is the honest response.
+	// Fatal means report the error and let the process exit.
 	Fatal
 )
 
@@ -44,12 +41,9 @@ func (a Action) String() string {
 	}
 }
 
-// Classify decides what to do about err.
-//
-// It errs towards Retry. A connection that has gone bad is repairable -- the
-// keep-alive rebuilds it, which is what picks up an Octopus Cloud instance that
-// has moved -- so treating a broken stream as fatal throws away a pod for
-// something that fixes itself.
+// Classify errs towards Retry: the keep-alive rebuilds a connection that has gone
+// bad, so treating a broken stream as fatal throws away a pod for something that
+// fixes itself.
 func Classify(err error) Action {
 	if err == nil {
 		return Stop
@@ -80,8 +74,8 @@ func Classify(err error) Action {
 	}
 }
 
-// classifyInternal separates a connection that broke from a server that is
-// broken. gRPC reports both as Internal and only the message tells them apart.
+// classifyInternal matches on the message because gRPC reports both a broken
+// connection and a broken server as Internal, and only the message tells them apart.
 func classifyInternal(message string) Action {
 	for _, brokenTransport := range []string{"EOF", "RST_STREAM"} {
 		if strings.Contains(message, brokenTransport) {

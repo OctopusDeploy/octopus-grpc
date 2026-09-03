@@ -18,9 +18,8 @@ const (
 )
 
 // HealthCheckProbeTimeout is how long a single probe waits for an answer. It is
-// deliberately not the interval: backing off changes how often Octopus Server is
-// asked, not how long the keep-alive is willing to wait for a reply, and a probe
-// that waited a whole backed-off interval would report an outage minutes late.
+// deliberately not the interval: a probe that waited out a backed-off interval
+// would report an outage minutes late.
 const HealthCheckProbeTimeout = 15 * time.Second
 
 // HealthCheckConfig is how often the keep-alive probes and how long it tolerates
@@ -30,16 +29,11 @@ type HealthCheckConfig struct {
 	Interval time.Duration
 
 	// MaxInterval caps the gap while it is not. Each failed probe doubles the
-	// interval up to this, so a long outage is not spent probing a server that
-	// has already said it is not there.
+	// interval up to this.
 	MaxInterval time.Duration
 
-	// GiveUpAfter is how long an outage may last before the keep-alive reports a
-	// fatal error and stops, leaving the process to exit and be restarted.
-	//
-	// It is measured from the first failed probe. Backing off never waits past
-	// the boundary, so a last probe lands on it and giving up overshoots only by
-	// that probe's own latency.
+	// GiveUpAfter is how long an outage may last, measured from the first failed
+	// probe, before the keep-alive reports a fatal error and stops.
 	GiveUpAfter time.Duration
 }
 
@@ -179,8 +173,6 @@ func (c HealthCheckConfig) withDefaults() HealthCheckConfig {
 	return c
 }
 
-// check runs one probe and acts on the result, returning false when the loop
-// should stop.
 func (h *HealthCheck) check() bool {
 	if err := h.probe(); err != nil {
 		return h.recordFailure(err)
@@ -231,9 +223,8 @@ func (h *HealthCheck) recordFailure(err error) bool {
 		return false
 	}
 
-	// Replace the client before the next probe rather than after it. The
-	// address the current client resolved to may be the one that went
-	// away, and probing it again would only keep confirming that.
+	// The address the current client resolved to may be the one that went away,
+	// and probing it again would only keep confirming that.
 	if rebuildErr := h.connection.Rebuild(); rebuildErr != nil {
 		h.logger.Warn("Continuing on the existing connection", slog.Any("error", rebuildErr))
 	}
@@ -243,9 +234,8 @@ func (h *HealthCheck) recordFailure(err error) bool {
 	return true
 }
 
-// nextInterval doubles the gap up to MaxInterval, but never reaches past the
-// give-up boundary. Waiting a whole backed-off interval over it would throw away
-// the last chance to recover and hold the fatal error back by minutes.
+// nextInterval never reaches past the give-up boundary. Waiting a backed-off
+// interval over it would throw away the last chance to recover.
 func (h *HealthCheck) nextInterval() time.Duration {
 	backedOff := min(h.interval*2, h.cfg.MaxInterval)
 	remaining := time.Until(h.outageStart.Add(h.cfg.GiveUpAfter))

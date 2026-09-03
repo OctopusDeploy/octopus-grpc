@@ -109,8 +109,7 @@ func TestHealthCheck_Start_SendsNoUpWithoutAPrecedingDown(t *testing.T) {
 	}
 }
 
-// A recovery has to restart the outage clock, not just report Up. Otherwise a
-// server that flapped hours ago would count towards giving up on the next blip.
+// Otherwise a server that flapped hours ago would count towards the next blip.
 func TestHealthCheck_Start_RestartsTheOutageClockOnRecovery(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
@@ -247,8 +246,6 @@ func TestHealthCheck_Start_KeepsGoingWhenAReplacementFails(t *testing.T) {
 	}
 }
 
-// Driven through the unexported steps rather than Start, so the assertion is on
-// the interval itself rather than on how quickly probes happen to land.
 func TestHealthCheck_Failure_DoublesTheIntervalUpToTheMaximum(t *testing.T) {
 	cfg := HealthCheckConfig{
 		Interval:    20 * time.Millisecond,
@@ -298,9 +295,7 @@ func TestNewHealthCheck_RaisesAMaximumIntervalBelowTheInterval(t *testing.T) {
 	}
 }
 
-// A backed-off interval that reached past the boundary would throw away the last
-// chance to recover and hold the fatal error back by a whole interval. These
-// settings are deliberately misaligned: doubling alone would probe at 0, 200,
+// These settings are deliberately misaligned: doubling alone would probe at 0, 200,
 // 600 and 1400ms, giving up 400ms late.
 func TestHealthCheck_Start_TakesALastProbeOnTheGiveUpBoundary(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -335,9 +330,8 @@ func TestHealthCheck_Start_TakesALastProbeOnTheGiveUpBoundary(t *testing.T) {
 	}
 }
 
-// testConfig pins the maximum interval to the interval, so a test that drives
-// repeated failures keeps probing at a rate it can assert against. Backing off is
-// covered on its own.
+// testConfig pins the maximum interval to the interval, so repeated failures keep
+// probing at a rate the test can assert against.
 func testConfig(interval, giveUpAfter time.Duration) HealthCheckConfig {
 	return HealthCheckConfig{Interval: interval, MaxInterval: interval, GiveUpAfter: giveUpAfter}
 }
