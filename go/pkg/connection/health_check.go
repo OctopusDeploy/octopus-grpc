@@ -25,10 +25,10 @@ const HealthCheckProbeTimeout = 15 * time.Second
 // HealthCheckConfig is how often the keep-alive probes and how long it tolerates
 // an outage before giving up.
 type HealthCheckConfig struct {
-	// Interval is the gap between probes while Octopus Server is answering.
+	// Interval is the duration between probes while Octopus Server is answering.
 	Interval time.Duration
 
-	// MaxInterval caps the gap while it is not. Each failed probe doubles the
+	// MaxInterval is the maximum possible duration between probes. Each failed probe doubles the
 	// interval up to this.
 	MaxInterval time.Duration
 
