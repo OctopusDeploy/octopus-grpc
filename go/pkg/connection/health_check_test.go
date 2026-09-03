@@ -12,7 +12,7 @@ func TestHealthCheck_Start_ProbesWhileTheServerIsHealthy(t *testing.T) {
 	defer cancel()
 
 	connection := newTestConnection(t)
-	go NewHealthCheck(ctx, connection, 50*time.Millisecond, 100, discardLogger()).Start()
+	go NewHealthCheck(ctx, connection, testConfig(50*time.Millisecond, time.Minute), discardLogger()).Start()
 	time.Sleep(300 * time.Millisecond)
 
 	if connection.checks.Load() == 0 {
@@ -43,7 +43,9 @@ func TestHealthCheck_Start_SendsDownOnTheFirstFailedProbe(t *testing.T) {
 			defer cancel()
 
 			connection := newTestConnection(t)
-			healthCheck := NewHealthCheck(ctx, connection, 20*time.Millisecond, 100, discardLogger())
+			healthCheck := NewHealthCheck(
+				ctx, connection, testConfig(20*time.Millisecond, time.Minute), discardLogger(),
+			)
 			test.fail(t, connection)
 			go healthCheck.Start()
 
@@ -60,7 +62,7 @@ func TestHealthCheck_Start_DoesNotRepeatDownWhileFailuresContinue(t *testing.T) 
 	defer cancel()
 
 	connection := newTestConnection(t)
-	healthCheck := NewHealthCheck(ctx, connection, 20*time.Millisecond, 100, discardLogger())
+	healthCheck := NewHealthCheck(ctx, connection, testConfig(20*time.Millisecond, time.Minute), discardLogger())
 	connection.serving(false)
 	go healthCheck.Start()
 
@@ -78,7 +80,7 @@ func TestHealthCheck_Start_SendsUpWhenTheServerRecovers(t *testing.T) {
 	defer cancel()
 
 	connection := newTestConnection(t)
-	healthCheck := NewHealthCheck(ctx, connection, 20*time.Millisecond, 100, discardLogger())
+	healthCheck := NewHealthCheck(ctx, connection, testConfig(20*time.Millisecond, time.Minute), discardLogger())
 	connection.serving(false)
 	go healthCheck.Start()
 
@@ -97,7 +99,7 @@ func TestHealthCheck_Start_SendsNoUpWithoutAPrecedingDown(t *testing.T) {
 	defer cancel()
 
 	connection := newTestConnection(t)
-	healthCheck := NewHealthCheck(ctx, connection, 50*time.Millisecond, 100, discardLogger())
+	healthCheck := NewHealthCheck(ctx, connection, testConfig(50*time.Millisecond, time.Minute), discardLogger())
 	go healthCheck.Start()
 
 	select {
@@ -107,61 +109,50 @@ func TestHealthCheck_Start_SendsNoUpWithoutAPrecedingDown(t *testing.T) {
 	}
 }
 
-// A recovery has to zero the failure count, not just report Up. Counting probes
-// rather than timing them keeps this deterministic: after recovering, giving up
-// must take a whole limit's worth of failures again, so at least that many probes
-// have to reach the server.
-func TestHealthCheck_Start_ResetsTheFailureCountOnRecovery(t *testing.T) {
+// Otherwise a server that flapped hours ago would count towards the next blip.
+func TestHealthCheck_Start_RestartsTheOutageClockOnRecovery(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
-	const maxFailures = 8
+	const giveUpAfter = 500 * time.Millisecond
 
 	connection := newTestConnection(t)
 	connection.awaitReady(t)
-	healthCheck := NewHealthCheck(ctx, connection, 20*time.Millisecond, maxFailures, discardLogger())
+	healthCheck := NewHealthCheck(ctx, connection, testConfig(20*time.Millisecond, giveUpAfter), discardLogger())
 	go healthCheck.Start()
 
-	// Accumulate some failures, but stop short of the limit.
+	// Fail for a while, but recover before the budget runs out.
 	connection.serving(false)
 	awaitTransition(t, ctx, healthCheck, Down)
-
-	before := connection.checks.Load()
-	if !eventually(2*time.Second, func() bool { return connection.checks.Load() >= before+5 }) {
-		t.Fatal("Expected the probe loop to keep failing")
-	}
+	time.Sleep(giveUpAfter / 2)
 
 	connection.serving(true)
 	awaitTransition(t, ctx, healthCheck, Up)
-	atRecovery := connection.checks.Load()
 
+	secondOutage := time.Now()
 	connection.serving(false)
 
 	select {
 	case <-healthCheck.Errors():
-		if since := connection.checks.Load() - atRecovery; since < maxFailures {
-			t.Errorf(
-				"Expected %d failures after recovery before giving up, it gave up after %d probes",
-				maxFailures, since,
-			)
+		if lasted := time.Since(secondOutage); lasted < giveUpAfter {
+			t.Errorf("Expected a whole %s budget after recovery, it gave up after %s", giveUpAfter, lasted)
 		}
 	case <-ctx.Done():
 		t.Fatal("Expected it to give up eventually, it did not")
 	}
 }
 
-// maxConsecutiveFailures is the failure that ends the process, not the last one it
-// survives. An off-by-one costs an extra interval of downtime before Kubernetes
-// gets the chance to restart the pod.
-func TestHealthCheck_Start_GivesUpOnTheMaximumFailureNotTheOneAfter(t *testing.T) {
+func TestHealthCheck_Start_GivesUpOnceTheOutageOutlastsTheBudget(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
-	const maxFailures = 3
+	const giveUpAfter = 300 * time.Millisecond
 
 	connection := newTestConnection(t)
 	connection.unreachable(t)
-	healthCheck := NewHealthCheck(ctx, connection, 20*time.Millisecond, maxFailures, discardLogger())
+	healthCheck := NewHealthCheck(ctx, connection, testConfig(20*time.Millisecond, giveUpAfter), discardLogger())
+
+	started := time.Now()
 	go healthCheck.Start()
 
 	select {
@@ -169,8 +160,11 @@ func TestHealthCheck_Start_GivesUpOnTheMaximumFailureNotTheOneAfter(t *testing.T
 		if err == nil {
 			t.Fatal("Expected a non-nil fatal error")
 		}
-		if !strings.Contains(err.Error(), "3 consecutive failures") {
-			t.Errorf("Expected the error to name the failure count, got %v", err)
+		if !strings.Contains(err.Error(), "no answer from Octopus Server") {
+			t.Errorf("Expected the error to name the outage, got %v", err)
+		}
+		if lasted := time.Since(started); lasted < giveUpAfter {
+			t.Errorf("Expected it to tolerate the outage for %s, it gave up after %s", giveUpAfter, lasted)
 		}
 	case <-ctx.Done():
 		t.Fatal("Expected a fatal error, got none")
@@ -181,7 +175,7 @@ func TestHealthCheck_Start_StopsWhenItsContextIsCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 
 	connection := newTestConnection(t)
-	healthCheck := NewHealthCheck(ctx, connection, 20*time.Millisecond, 100, discardLogger())
+	healthCheck := NewHealthCheck(ctx, connection, testConfig(20*time.Millisecond, time.Minute), discardLogger())
 
 	stopped := make(chan struct{})
 	go func() {
@@ -207,7 +201,7 @@ func TestHealthCheck_Start_ReplacesTheClientAfterAFailedProbe(t *testing.T) {
 
 	connection := newTestConnection(t)
 	connection.serving(false)
-	go NewHealthCheck(ctx, connection, 20*time.Millisecond, 100, discardLogger()).Start()
+	go NewHealthCheck(ctx, connection, testConfig(20*time.Millisecond, time.Minute), discardLogger()).Start()
 
 	if !eventually(2*time.Second, func() bool { return connection.rebuilds.Load() >= 3 }) {
 		t.Errorf("Expected repeated failures to keep replacing the client, saw %d replacements",
@@ -220,7 +214,7 @@ func TestHealthCheck_Start_DoesNotReplaceTheClientWhileProbesSucceed(t *testing.
 	defer cancel()
 
 	connection := newTestConnection(t)
-	go NewHealthCheck(ctx, connection, 50*time.Millisecond, 100, discardLogger()).Start()
+	go NewHealthCheck(ctx, connection, testConfig(50*time.Millisecond, time.Minute), discardLogger()).Start()
 	time.Sleep(300 * time.Millisecond)
 
 	if got := connection.rebuilds.Load(); got != 0 {
@@ -237,7 +231,9 @@ func TestHealthCheck_Start_KeepsGoingWhenAReplacementFails(t *testing.T) {
 	connection := newTestConnection(t)
 	connection.rebuildErr = errUnreachable
 	connection.unreachable(t)
-	healthCheck := NewHealthCheck(ctx, connection, 20*time.Millisecond, 3, discardLogger())
+	healthCheck := NewHealthCheck(
+		ctx, connection, testConfig(20*time.Millisecond, 300*time.Millisecond), discardLogger(),
+	)
 	go healthCheck.Start()
 
 	select {
@@ -250,15 +246,94 @@ func TestHealthCheck_Start_KeepsGoingWhenAReplacementFails(t *testing.T) {
 	}
 }
 
-func TestNewHealthCheck_FallsBackToDefaultsForZeroValues(t *testing.T) {
-	healthCheck := NewHealthCheck(t.Context(), newTestConnection(t), 0, 0, discardLogger())
+func TestHealthCheck_Failure_DoublesTheIntervalUpToTheMaximum(t *testing.T) {
+	cfg := HealthCheckConfig{
+		Interval:    20 * time.Millisecond,
+		MaxInterval: 80 * time.Millisecond,
+		GiveUpAfter: time.Minute,
+	}
+	healthCheck := NewHealthCheck(t.Context(), newTestConnection(t), cfg, discardLogger())
 
-	if healthCheck.interval != DefaultHealthCheckInterval {
-		t.Errorf("Expected the default interval, got %s", healthCheck.interval)
+	want := []time.Duration{40, 80, 80, 80}
+	for i, expected := range want {
+		healthCheck.recordFailure(errUnreachable)
+
+		if got := healthCheck.interval; got != expected*time.Millisecond {
+			t.Fatalf("Expected the interval to be %s after failure %d, got %s", expected*time.Millisecond, i+1, got)
+		}
 	}
-	if healthCheck.maxConsecutiveFailures != DefaultHealthCheckMaxFailures {
-		t.Errorf("Expected the default failure limit, got %d", healthCheck.maxConsecutiveFailures)
+
+	healthCheck.recordSuccess()
+
+	if healthCheck.interval != cfg.Interval {
+		t.Errorf("Expected recovery to restore the %s interval, got %s", cfg.Interval, healthCheck.interval)
 	}
+}
+
+func TestNewHealthCheck_FallsBackToDefaultsForZeroValues(t *testing.T) {
+	healthCheck := NewHealthCheck(t.Context(), newTestConnection(t), HealthCheckConfig{}, discardLogger())
+
+	if healthCheck.cfg.Interval != DefaultHealthCheckInterval {
+		t.Errorf("Expected the default interval, got %s", healthCheck.cfg.Interval)
+	}
+	if healthCheck.cfg.MaxInterval != DefaultHealthCheckMaxInterval {
+		t.Errorf("Expected the default maximum interval, got %s", healthCheck.cfg.MaxInterval)
+	}
+	if healthCheck.cfg.GiveUpAfter != DefaultHealthCheckGiveUpAfter {
+		t.Errorf("Expected the default give up duration, got %s", healthCheck.cfg.GiveUpAfter)
+	}
+}
+
+// A cap below the interval would otherwise have the keep-alive back off to
+// probing more often than it was asked to.
+func TestNewHealthCheck_RaisesAMaximumIntervalBelowTheInterval(t *testing.T) {
+	cfg := HealthCheckConfig{Interval: time.Minute, MaxInterval: time.Second}
+	healthCheck := NewHealthCheck(t.Context(), newTestConnection(t), cfg, discardLogger())
+
+	if healthCheck.cfg.MaxInterval != cfg.Interval {
+		t.Errorf("Expected the maximum interval to be raised to %s, got %s", cfg.Interval, healthCheck.cfg.MaxInterval)
+	}
+}
+
+// These settings are deliberately misaligned: doubling alone would probe at 0, 200,
+// 600 and 1400ms, giving up 400ms late.
+func TestHealthCheck_Start_TakesALastProbeOnTheGiveUpBoundary(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	const giveUpAfter = time.Second
+
+	cfg := HealthCheckConfig{
+		Interval:    100 * time.Millisecond,
+		MaxInterval: 800 * time.Millisecond,
+		GiveUpAfter: giveUpAfter,
+	}
+
+	connection := newTestConnection(t)
+	connection.unreachable(t)
+	healthCheck := NewHealthCheck(ctx, connection, cfg, discardLogger())
+
+	started := time.Now()
+	go healthCheck.Start()
+
+	select {
+	case <-healthCheck.Errors():
+		lasted := time.Since(started)
+		if lasted < giveUpAfter {
+			t.Errorf("Expected it to tolerate the outage for %s, it gave up after %s", giveUpAfter, lasted)
+		}
+		if lasted > giveUpAfter+cfg.MaxInterval/2 {
+			t.Errorf("Expected it to give up on the boundary, it waited out a backed-off interval: %s", lasted)
+		}
+	case <-ctx.Done():
+		t.Fatal("Expected a fatal error, got none")
+	}
+}
+
+// testConfig pins the maximum interval to the interval, so repeated failures keep
+// probing at a rate the test can assert against.
+func testConfig(interval, giveUpAfter time.Duration) HealthCheckConfig {
+	return HealthCheckConfig{Interval: interval, MaxInterval: interval, GiveUpAfter: giveUpAfter}
 }
 
 func awaitTransition(t *testing.T, ctx context.Context, healthCheck *HealthCheck, want Transition) {
