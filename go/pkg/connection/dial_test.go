@@ -162,7 +162,7 @@ func TestDial_WaitForReadyTurnsARejectedHandshakeIntoADeadline(t *testing.T) {
 
 // healthCheckConfig is left out on purpose: it would take the only subchannel out of READY
 // on NOT_SERVING, so waitForReady would queue the probes that would have seen the server
-// recover. This binary links grpc/health, so the config would be live here.
+// recover.
 func TestDial_ProbesAnUnhealthyServerRatherThanQueueingBehindIt(t *testing.T) {
 	addr, healthServer := startHealthServer(t)
 	healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
@@ -184,6 +184,45 @@ func TestDial_ProbesAnUnhealthyServerRatherThanQueueingBehindIt(t *testing.T) {
 		t.Errorf("Expected the probe to report NOT_SERVING, got %s", resp.GetStatus())
 	}
 }
+
+// Positive control for the test above, which would pass just as well if this binary never
+// linked google.golang.org/grpc/health. Asking for health checking explicitly proves the
+// feature is live here, so the absent config is what keeps probes answerable.
+func TestDial_HealthCheckingQueuesProbesWhenTheServiceConfigAsksForIt(t *testing.T) {
+	addr, healthServer := startHealthServer(t)
+	healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
+
+	client, err := Dial(Config{
+		ServerURL:   addr,
+		TLS:         TLSConfig{Plaintext: true},
+		DialOptions: []grpc.DialOption{grpc.WithDefaultServiceConfig(healthCheckingServiceConfig)},
+	}, discardLogger())
+	if err != nil {
+		t.Fatalf("Expected to build a client, got %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err = grpc_health_v1.NewHealthClient(client).Check(ctx, &grpc_health_v1.HealthCheckRequest{})
+	if status.Code(err) != codes.DeadlineExceeded {
+		t.Fatalf("Expected the probe to be queued until its deadline, got %v", err)
+	}
+	// The code alone would also match a slow dial; the balancer error is what says the probe
+	// was held back by health checking rather than anything else.
+	if !strings.Contains(status.Convert(err).Message(), "health check failed") {
+		t.Errorf("Expected the deadline to blame health checking, got %q", status.Convert(err).Message())
+	}
+}
+
+// healthCheckingServiceConfig is the shared config with healthCheckConfig put back, which
+// is all it takes to switch the feature on.
+const healthCheckingServiceConfig = `{
+  "loadBalancingConfig": [{ "round_robin": {} }],
+  "healthCheckConfig": { "serviceName": "" },
+  "methodConfig": [{ "name": [{}], "waitForReady": true }]
+}`
 
 // waitForReady covers every method, not just Health. The handshake is rejected
 // before dispatch, so the method need not exist and the payload types never matter.
