@@ -160,13 +160,9 @@ func TestDial_WaitForReadyTurnsARejectedHandshakeIntoADeadline(t *testing.T) {
 	}
 }
 
-// The keep-alive decides that Octopus Server is unhealthy, not gRPC. The service
-// config leaves healthCheckConfig out on purpose: client-side health checking would
-// take the only subchannel out of READY while the server reports NOT_SERVING, and
-// waitForReady would then queue the keep-alive's own probes until they timed out, so
-// it could never see the server recover. Linking google.golang.org/grpc/health is all
-// it takes to switch that on, and this test binary links it, so prove a probe against
-// an unhealthy server still gets an answer.
+// healthCheckConfig is left out on purpose: it would take the only subchannel out of READY
+// on NOT_SERVING, so waitForReady would queue the probes that would have seen the server
+// recover. This binary links grpc/health, so the config would be live here.
 func TestDial_ProbesAnUnhealthyServerRatherThanQueueingBehindIt(t *testing.T) {
 	addr, healthServer := startHealthServer(t)
 	healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
