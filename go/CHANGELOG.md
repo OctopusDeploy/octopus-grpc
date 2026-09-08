@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/OctopusDeploy/octopus-grpc/compare/go/v0.5.0...go/v0.5.1) (2026-09-08)
+
+
+### Bug Fixes
+
+* stop asking gRPC for client-side health checking (we have our own health check call) ([#11](https://github.com/OctopusDeploy/octopus-grpc/issues/11)) ([db7def3](https://github.com/OctopusDeploy/octopus-grpc/commit/db7def372be9cfe964e198e290602cc832222d4b))
+
 ## [0.5.0](https://github.com/OctopusDeploy/octopus-grpc/compare/go/v0.4.0...go/v0.5.0) (2026-09-03)
 
 
