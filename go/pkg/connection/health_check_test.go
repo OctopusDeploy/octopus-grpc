@@ -284,7 +284,7 @@ func TestNewHealthCheck_FallsBackToDefaultsForZeroValues(t *testing.T) {
 	}
 }
 
-// A cap below the interval would otherwise have the keep-alive back off to
+// A cap below the interval would otherwise have the health check back off to
 // probing more often than it was asked to.
 func TestNewHealthCheck_RaisesAMaximumIntervalBelowTheInterval(t *testing.T) {
 	cfg := HealthCheckConfig{Interval: time.Minute, MaxInterval: time.Second}
