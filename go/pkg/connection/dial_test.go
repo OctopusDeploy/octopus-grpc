@@ -11,7 +11,6 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 )
@@ -161,6 +160,70 @@ func TestDial_WaitForReadyTurnsARejectedHandshakeIntoADeadline(t *testing.T) {
 	}
 }
 
+// healthCheckConfig is left out on purpose: it would take the only subchannel out of READY
+// on NOT_SERVING, so waitForReady would queue the probes that would have seen the server
+// recover.
+func TestDial_ProbesAnUnhealthyServerRatherThanQueueingBehindIt(t *testing.T) {
+	addr, healthServer := startHealthServer(t)
+	healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
+
+	client, err := Dial(Config{ServerURL: addr, TLS: TLSConfig{Plaintext: true}}, discardLogger())
+	if err != nil {
+		t.Fatalf("Expected to build a client, got %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := grpc_health_v1.NewHealthClient(client).Check(ctx, &grpc_health_v1.HealthCheckRequest{})
+	if err != nil {
+		t.Fatalf("Expected the probe to get an answer, got %v", err)
+	}
+	if resp.GetStatus() != grpc_health_v1.HealthCheckResponse_NOT_SERVING {
+		t.Errorf("Expected the probe to report NOT_SERVING, got %s", resp.GetStatus())
+	}
+}
+
+// Positive control for the test above, which would pass just as well if this binary never
+// linked google.golang.org/grpc/health. Asking for health checking explicitly proves the
+// feature is live here, so the absent config is what keeps probes answerable.
+func TestDial_HealthCheckingQueuesProbesWhenTheServiceConfigAsksForIt(t *testing.T) {
+	addr, healthServer := startHealthServer(t)
+	healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
+
+	client, err := Dial(Config{
+		ServerURL:   addr,
+		TLS:         TLSConfig{Plaintext: true},
+		DialOptions: []grpc.DialOption{grpc.WithDefaultServiceConfig(healthCheckingServiceConfig)},
+	}, discardLogger())
+	if err != nil {
+		t.Fatalf("Expected to build a client, got %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err = grpc_health_v1.NewHealthClient(client).Check(ctx, &grpc_health_v1.HealthCheckRequest{})
+	if status.Code(err) != codes.DeadlineExceeded {
+		t.Fatalf("Expected the probe to be queued until its deadline, got %v", err)
+	}
+	// The code alone would also match a slow dial; the balancer error is what says the probe
+	// was held back by health checking rather than anything else.
+	if !strings.Contains(status.Convert(err).Message(), "health check failed") {
+		t.Errorf("Expected the deadline to blame health checking, got %q", status.Convert(err).Message())
+	}
+}
+
+// healthCheckingServiceConfig is the shared config with healthCheckConfig put back, which
+// is all it takes to switch the feature on.
+const healthCheckingServiceConfig = `{
+  "loadBalancingConfig": [{ "round_robin": {} }],
+  "healthCheckConfig": { "serviceName": "" },
+  "methodConfig": [{ "name": [{}], "waitForReady": true }]
+}`
+
 // waitForReady covers every method, not just Health. The handshake is rejected
 // before dispatch, so the method need not exist and the payload types never matter.
 func invokeAnyMethod(ctx context.Context, client *grpc.ClientConn) error {
@@ -170,50 +233,4 @@ func invokeAnyMethod(ctx context.Context, client *grpc.ClientConn) error {
 		&grpc_health_v1.HealthCheckRequest{},
 		&grpc_health_v1.HealthCheckResponse{},
 	)
-}
-
-// The service config asks for client-side health checking, which gRPC performs by
-// streaming Health/Watch. Octopus Server serves Watch via Grpc.AspNetCore.HealthChecks,
-// so this is live rather than inert -- a server reporting NOT_SERVING must take the
-// client out of READY even though the connection stays up. Deleting healthCheckConfig
-// from GrpcServiceConfig.json leaves the client READY and fails this test.
-func TestDial_HealthCheckingTakesAnUnhealthyServerOutOfReady(t *testing.T) {
-	addr, healthServer := startHealthServer(t)
-	healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
-
-	client, err := Dial(Config{ServerURL: addr, TLS: TLSConfig{Plaintext: true}}, discardLogger())
-	if err != nil {
-		t.Fatalf("Expected to build a client, got %v", err)
-	}
-	t.Cleanup(func() { _ = client.Close() })
-
-	client.Connect()
-	awaitState(t, client, connectivity.Ready)
-
-	healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
-	awaitStateChangeFrom(t, client, connectivity.Ready)
-}
-
-func awaitState(t *testing.T, client *grpc.ClientConn, want connectivity.State) {
-	t.Helper()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	for client.GetState() != want {
-		if !client.WaitForStateChange(ctx, client.GetState()) {
-			t.Fatalf("Expected the client to reach %s, it was %s", want, client.GetState())
-		}
-	}
-}
-
-func awaitStateChangeFrom(t *testing.T, client *grpc.ClientConn, from connectivity.State) {
-	t.Helper()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	if !client.WaitForStateChange(ctx, from) {
-		t.Fatalf("Expected the client to leave %s, it stayed", from)
-	}
 }

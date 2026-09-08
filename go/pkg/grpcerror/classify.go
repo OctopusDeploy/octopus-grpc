@@ -41,7 +41,7 @@ func (a Action) String() string {
 	}
 }
 
-// Classify errs towards Retry: the keep-alive rebuilds a connection that has gone
+// Classify errs towards Retry: the health check rebuilds a connection that has gone
 // bad, so treating a broken stream as fatal throws away a pod for something that
 // fixes itself.
 func Classify(err error) Action {

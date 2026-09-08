@@ -22,7 +22,7 @@ const (
 // would report an outage minutes late.
 const HealthCheckProbeTimeout = 15 * time.Second
 
-// HealthCheckConfig is how often the keep-alive probes and how long it tolerates
+// HealthCheckConfig is how often the health check probes and how long it tolerates
 // an outage before giving up.
 type HealthCheckConfig struct {
 	// Interval is the duration between probes while Octopus Server is answering.
@@ -33,11 +33,11 @@ type HealthCheckConfig struct {
 	MaxInterval time.Duration
 
 	// GiveUpAfter is how long an outage may last, measured from the first failed
-	// probe, before the keep-alive reports a fatal error and stops.
+	// probe, before the health check reports a fatal error and stops.
 	GiveUpAfter time.Duration
 }
 
-// Transition is a change in what the keep-alive believes about Octopus Server's
+// Transition is a change in what the health check believes about Octopus Server's
 // health, sent once per change rather than once per probe. A caller that sees
 // Down will not see it again until an Up has been sent in between.
 type Transition int
@@ -60,9 +60,9 @@ func (t Transition) String() string {
 	return "down"
 }
 
-// HealthCheck sends periodic gRPC health check RPCs as application-level
-// keep-alives. This keeps connections alive through load balancers that
-// incorrectly respond to TCP-level gRPC keepalive frames.
+// HealthCheck sends periodic gRPC health check RPCs. The traffic they generate
+// also keeps connections alive through load balancers that incorrectly respond
+// to TCP-level gRPC keepalive frames.
 //
 // When health checks begin to fail it emits Down so subscribers can
 // be cancelled. When health recovers it emits Up so subscribers can
@@ -100,10 +100,10 @@ func NewHealthCheck(
 	}
 }
 
-// Start runs the keep-alive loop until ctx is cancelled or an outage outlasts
+// Start runs the health check loop until ctx is cancelled or an outage outlasts
 // GiveUpAfter. On the first failure it emits Down; on recovery it emits Up.
 func (h *HealthCheck) Start() {
-	h.logger.Info("Starting application keep alive",
+	h.logger.Info("Starting health checks",
 		slog.Any("interval", h.cfg.Interval),
 		slog.Any("maxInterval", h.cfg.MaxInterval),
 		slog.Any("giveUpAfter", h.cfg.GiveUpAfter),
@@ -162,7 +162,7 @@ func (c HealthCheckConfig) withDefaults() HealthCheckConfig {
 		c.MaxInterval = DefaultHealthCheckMaxInterval
 	}
 
-	// A cap below the interval would back the keep-alive off to probing more
+	// A cap below the interval would back the health check off to probing more
 	// often than it was asked to.
 	c.MaxInterval = max(c.MaxInterval, c.Interval)
 
@@ -205,10 +205,10 @@ func (h *HealthCheck) probe() error {
 func (h *HealthCheck) recordFailure(err error) bool {
 	if h.outageStart.IsZero() {
 		h.outageStart = time.Now()
-		h.logger.Warn("keep alive check failed - cancelling subscribers", slog.Any("error", err))
+		h.logger.Warn("Health check failed - cancelling subscribers", slog.Any("error", err))
 		h.events <- Down
 	} else {
-		h.logger.Warn("keep alive check still failing",
+		h.logger.Warn("Health check still failing",
 			slog.Any("error", err),
 			slog.Duration("outage", time.Since(h.outageStart)),
 		)
@@ -216,7 +216,7 @@ func (h *HealthCheck) recordFailure(err error) bool {
 
 	if outage := time.Since(h.outageStart); outage >= h.cfg.GiveUpAfter {
 		h.fatal <- fmt.Errorf(
-			"keep alive: no answer from Octopus Server for %s, last error: %w",
+			"health check: no answer from Octopus Server for %s, last error: %w",
 			outage.Round(time.Second), err,
 		)
 
@@ -245,13 +245,13 @@ func (h *HealthCheck) nextInterval() time.Duration {
 
 func (h *HealthCheck) recordSuccess() {
 	if h.outageStart.IsZero() {
-		h.logger.Debug("keep alive check succeeded")
+		h.logger.Debug("Health check succeeded")
 
 		return
 	}
 
 	h.outageStart = time.Time{}
 	h.interval = h.cfg.Interval
-	h.logger.Info("keep alive recovered - restarting subscribers")
+	h.logger.Info("Health check recovered - restarting subscribers")
 	h.events <- Up
 }
