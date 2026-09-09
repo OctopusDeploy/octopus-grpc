@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc/health/grpc_health_v1"
@@ -37,45 +38,41 @@ type HealthCheckConfig struct {
 	GiveUpAfter time.Duration
 }
 
-// Transition is a change in what the health check believes about Octopus Server's
-// health, sent once per change rather than once per probe. A caller that sees
-// Down will not see it again until an Up has been sent in between.
-type Transition int
-
-const (
-	// Down is sent on the first failed health check.
-	// Subscribers should be cancelled and wait for Up before restarting.
-	Down Transition = iota
-
-	// Up is sent when health recovers after a Down.
-	// Subscribers should be restarted.
-	Up
-)
-
-func (t Transition) String() string {
-	if t == Up {
-		return "up"
-	}
-
-	return "down"
+// snapshot is what the last probe observed, together with a count of how many
+// times Octopus Server has stopped answering.
+//
+// outages is here because healthy on its own cannot express a flap. An outage
+// breaks every stream open at the time and usually replaces the connection
+// underneath them, so a Supervisor that was busy through one and found a healthy
+// server afterwards still has to restart the subscribers. Comparing outages
+// against the value the subscribers were started under is how it tells "still up"
+// from "up again".
+type snapshot struct {
+	healthy bool
+	outages uint64
 }
 
 // HealthCheck sends periodic gRPC health check RPCs. The traffic they generate
 // also keeps connections alive through load balancers that incorrectly respond
 // to TCP-level gRPC keepalive frames.
 //
-// When health checks begin to fail it emits Down so subscribers can
-// be cancelled. When health recovers it emits Up so subscribers can
-// be restarted. If an outage outlasts GiveUpAfter it sends a fatal error
-// to Errors() and stops, allowing the process to exit and be restarted by
-// Kubernetes.
+// What it observes is not a caller's to handle. Pass it to a Supervisor, which
+// stops the subscribers while Octopus Server is not answering and starts them
+// again on the replacement connection. If an outage outlasts GiveUpAfter the
+// Supervisor's Run returns a fatal error, allowing the process to exit and be
+// restarted by Kubernetes.
 type HealthCheck struct {
 	ctx        context.Context
 	connection Connection
 	cfg        HealthCheckConfig
 	logger     *slog.Logger
 	fatal      chan error
-	events     chan Transition
+
+	// The current snapshot, and the slot the next one goes in.
+	mu      sync.Mutex
+	healthy bool
+	outages uint64
+	updates chan snapshot
 
 	interval    time.Duration
 	outageStart time.Time
@@ -95,13 +92,14 @@ func NewHealthCheck(
 		cfg:        cfg,
 		logger:     logger,
 		fatal:      make(chan error, 1),
-		events:     make(chan Transition, 2),
+		healthy:    true,
+		updates:    make(chan snapshot, 1),
 		interval:   cfg.Interval,
 	}
 }
 
 // Start runs the health check loop until ctx is cancelled or an outage outlasts
-// GiveUpAfter. On the first failure it emits Down; on recovery it emits Up.
+// GiveUpAfter. A Supervisor calls this; a caller does not.
 func (h *HealthCheck) Start() {
 	h.logger.Info("Starting health checks",
 		slog.Any("interval", h.cfg.Interval),
@@ -126,31 +124,8 @@ func (h *HealthCheck) Start() {
 	}
 }
 
-func (h *HealthCheck) Events() <-chan Transition {
-	return h.events
-}
-
-func (h *HealthCheck) Errors() <-chan error {
-	return h.fatal
-}
-
 func (h *HealthCheck) Context() context.Context {
 	return h.ctx
-}
-
-func (h *HealthCheck) AwaitRecovery(ctx context.Context) bool {
-	for {
-		select {
-		case <-ctx.Done():
-			return false
-		case <-h.fatal:
-			return false
-		case event := <-h.events:
-			if event == Up {
-				return true
-			}
-		}
-	}
 }
 
 func (c HealthCheckConfig) withDefaults() HealthCheckConfig {
@@ -206,7 +181,7 @@ func (h *HealthCheck) recordFailure(err error) bool {
 	if h.outageStart.IsZero() {
 		h.outageStart = time.Now()
 		h.logger.Warn("Health check failed - cancelling subscribers", slog.Any("error", err))
-		h.events <- Down
+		h.setHealthy(false)
 	} else {
 		h.logger.Warn("Health check still failing",
 			slog.Any("error", err),
@@ -253,5 +228,47 @@ func (h *HealthCheck) recordSuccess() {
 	h.outageStart = time.Time{}
 	h.interval = h.cfg.Interval
 	h.logger.Info("Health check recovered - restarting subscribers")
-	h.events <- Up
+	h.setHealthy(true)
+}
+
+// snapshot reports what the last probe observed.
+func (h *HealthCheck) snapshot() snapshot {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	return snapshot{healthy: h.healthy, outages: h.outages}
+}
+
+func (h *HealthCheck) setHealthy(healthy bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.healthy == healthy {
+		return
+	}
+
+	h.healthy = healthy
+	if !healthy {
+		h.outages++
+	}
+
+	h.publish(snapshot{healthy: h.healthy, outages: h.outages})
+}
+
+// publish leaves the newest snapshot in the one-slot channel, discarding an unread
+// one. Called with the lock held; every send here is non-blocking, so a Supervisor
+// busy stopping subscribers can never stall a probe -- and the give-up error,
+// which is sent after this point, can never end up stuck behind it.
+func (h *HealthCheck) publish(latest snapshot) {
+	for {
+		select {
+		case h.updates <- latest:
+			return
+		default:
+			select {
+			case <-h.updates:
+			default:
+			}
+		}
+	}
 }
