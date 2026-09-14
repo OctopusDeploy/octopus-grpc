@@ -20,7 +20,7 @@ func TestHealthCheck_Start_ProbesWhileTheServerIsHealthy(t *testing.T) {
 	}
 }
 
-func TestHealthCheck_Start_SendsDownOnTheFirstFailedProbe(t *testing.T) {
+func TestHealthCheck_Start_ReportsUnhealthyOnTheFirstFailedProbe(t *testing.T) {
 	// A server answering NOT_SERVING is reachable but unhealthy. That is a failed
 	// probe as much as a refused connection is.
 	tests := []struct {
@@ -49,15 +49,15 @@ func TestHealthCheck_Start_SendsDownOnTheFirstFailedProbe(t *testing.T) {
 			test.fail(t, connection)
 			go healthCheck.Start()
 
-			awaitTransition(t, ctx, healthCheck, Down)
+			awaitSnapshot(t, ctx, healthCheck, snapshot{healthy: false, unhealthyCount: 1})
 		})
 	}
 }
 
-// Down is an edge. A caller cancels its subscribers once on Down, so repeating it
-// on every subsequent failed probe would have it cancelling work it had already
-// stopped.
-func TestHealthCheck_Start_DoesNotRepeatDownWhileFailuresContinue(t *testing.T) {
+// A snapshot is published when health changes, not on every probe. The Supervisor
+// stops the subscribers once, so republishing the same state would have it
+// stopping work it had already stopped.
+func TestHealthCheck_Start_PublishesNothingFurtherWhileFailuresContinue(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 
@@ -66,16 +66,16 @@ func TestHealthCheck_Start_DoesNotRepeatDownWhileFailuresContinue(t *testing.T) 
 	connection.serving(false)
 	go healthCheck.Start()
 
-	awaitTransition(t, ctx, healthCheck, Down)
+	awaitSnapshot(t, ctx, healthCheck, snapshot{healthy: false, unhealthyCount: 1})
 
 	select {
-	case transition := <-healthCheck.Events():
-		t.Errorf("Expected no further transition while failures continue, got %s", transition)
+	case latest := <-healthCheck.updates:
+		t.Errorf("Expected no further snapshot while failures continue, got %+v", latest)
 	case <-time.After(200 * time.Millisecond):
 	}
 }
 
-func TestHealthCheck_Start_SendsUpWhenTheServerRecovers(t *testing.T) {
+func TestHealthCheck_Start_ReportsHealthyWhenTheServerRecovers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -84,14 +84,14 @@ func TestHealthCheck_Start_SendsUpWhenTheServerRecovers(t *testing.T) {
 	connection.serving(false)
 	go healthCheck.Start()
 
-	awaitTransition(t, ctx, healthCheck, Down)
+	awaitSnapshot(t, ctx, healthCheck, snapshot{healthy: false, unhealthyCount: 1})
 	connection.serving(true)
-	awaitTransition(t, ctx, healthCheck, Up)
+	awaitSnapshot(t, ctx, healthCheck, snapshot{healthy: true, unhealthyCount: 1})
 }
 
-// Up is an edge too: with no preceding Down there is nothing to recover from, and
-// a caller acting on every event would restart its subscribers on every probe.
-func TestHealthCheck_Start_SendsNoUpWithoutAPrecedingDown(t *testing.T) {
+// With no preceding outage there is nothing to recover from, and a Supervisor
+// acting on every probe would restart the subscribers every interval.
+func TestHealthCheck_Start_PublishesNothingWhileEveryProbeSucceeds(t *testing.T) {
 	// Cancelled after the assertion window, not as part of it. Probe contexts derive
 	// from this one, so a deadline expiring mid-probe fails that probe and shows up
 	// as a transition the server never caused.
@@ -103,8 +103,8 @@ func TestHealthCheck_Start_SendsNoUpWithoutAPrecedingDown(t *testing.T) {
 	go healthCheck.Start()
 
 	select {
-	case transition := <-healthCheck.Events():
-		t.Fatalf("Expected no transition while every probe succeeds, got %s", transition)
+	case latest := <-healthCheck.updates:
+		t.Fatalf("Expected no snapshot while every probe succeeds, got %+v", latest)
 	case <-time.After(400 * time.Millisecond):
 	}
 }
@@ -123,17 +123,17 @@ func TestHealthCheck_Start_RestartsTheOutageClockOnRecovery(t *testing.T) {
 
 	// Fail for a while, but recover before the budget runs out.
 	connection.serving(false)
-	awaitTransition(t, ctx, healthCheck, Down)
+	awaitSnapshot(t, ctx, healthCheck, snapshot{healthy: false, unhealthyCount: 1})
 	time.Sleep(giveUpAfter / 2)
 
 	connection.serving(true)
-	awaitTransition(t, ctx, healthCheck, Up)
+	awaitSnapshot(t, ctx, healthCheck, snapshot{healthy: true, unhealthyCount: 1})
 
 	secondOutage := time.Now()
 	connection.serving(false)
 
 	select {
-	case <-healthCheck.Errors():
+	case <-healthCheck.fatal:
 		if lasted := time.Since(secondOutage); lasted < giveUpAfter {
 			t.Errorf("Expected a whole %s budget after recovery, it gave up after %s", giveUpAfter, lasted)
 		}
@@ -156,7 +156,7 @@ func TestHealthCheck_Start_GivesUpOnceTheOutageOutlastsTheBudget(t *testing.T) {
 	go healthCheck.Start()
 
 	select {
-	case err := <-healthCheck.Errors():
+	case err := <-healthCheck.fatal:
 		if err == nil {
 			t.Fatal("Expected a non-nil fatal error")
 		}
@@ -237,7 +237,7 @@ func TestHealthCheck_Start_KeepsGoingWhenAReplacementFails(t *testing.T) {
 	go healthCheck.Start()
 
 	select {
-	case err := <-healthCheck.Errors():
+	case err := <-healthCheck.fatal:
 		if err == nil {
 			t.Fatal("Expected a non-nil fatal error")
 		}
@@ -317,7 +317,7 @@ func TestHealthCheck_Start_TakesALastProbeOnTheGiveUpBoundary(t *testing.T) {
 	go healthCheck.Start()
 
 	select {
-	case <-healthCheck.Errors():
+	case <-healthCheck.fatal:
 		lasted := time.Since(started)
 		if lasted < giveUpAfter {
 			t.Errorf("Expected it to tolerate the outage for %s, it gave up after %s", giveUpAfter, lasted)
@@ -336,16 +336,16 @@ func testConfig(interval, giveUpAfter time.Duration) HealthCheckConfig {
 	return HealthCheckConfig{Interval: interval, MaxInterval: interval, GiveUpAfter: giveUpAfter}
 }
 
-func awaitTransition(t *testing.T, ctx context.Context, healthCheck *HealthCheck, want Transition) {
+func awaitSnapshot(t *testing.T, ctx context.Context, healthCheck *HealthCheck, want snapshot) {
 	t.Helper()
 
 	select {
-	case got := <-healthCheck.Events():
+	case got := <-healthCheck.updates:
 		if got != want {
-			t.Fatalf("Expected transition %s, got %s", want, got)
+			t.Fatalf("Expected snapshot %+v, got %+v", want, got)
 		}
 	case <-ctx.Done():
-		t.Fatalf("Expected transition %s, got none", want)
+		t.Fatalf("Expected snapshot %+v, got none", want)
 	}
 }
 
