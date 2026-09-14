@@ -74,7 +74,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 
 // reconcile acts on where health stands rather than on what changed, so a snapshot
 // that overwrote an unread one costs nothing: an outage the Supervisor was busy
-// through still arrives as an outage count it has not started under.
+// through still arrives as an unhealthy count it has not started under.
 func (s *Supervisor) reconcile(ctx context.Context, latest snapshot) error {
 	if !latest.healthy {
 		s.logger.Warn("Octopus Server stopped answering, stopping subscribers")
@@ -83,7 +83,7 @@ func (s *Supervisor) reconcile(ctx context.Context, latest snapshot) error {
 		return nil
 	}
 
-	if latest.outages == s.startedUnder {
+	if latest.unhealthyCount == s.startedUnder {
 		return nil
 	}
 
@@ -93,14 +93,14 @@ func (s *Supervisor) reconcile(ctx context.Context, latest snapshot) error {
 	return s.start(ctx)
 }
 
-// start records the outage count before starting rather than after. An outage that
-// begins while the subscribers are starting would otherwise be recorded as one
+// start records the unhealthy count before starting rather than after. An outage
+// that begins while the subscribers are starting would otherwise be recorded as one
 // they had already been started under, and they would hold a closed connection for
 // good.
 func (s *Supervisor) start(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
-	s.startedUnder = s.healthCheck.snapshot().outages
+	s.startedUnder = s.healthCheck.snapshot().unhealthyCount
 
 	if err := s.subscribers.Start(runCtx); err != nil {
 		cancel()

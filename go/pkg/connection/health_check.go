@@ -39,17 +39,17 @@ type HealthCheckConfig struct {
 }
 
 // snapshot is what the last probe observed, together with a count of how many
-// times Octopus Server has stopped answering.
+// times the health check has gone unhealthy.
 //
-// outages is here because healthy on its own cannot express a flap. An outage
-// breaks every stream open at the time and usually replaces the connection
-// underneath them, so a Supervisor that was busy through one and found a healthy
-// server afterwards still has to restart the subscribers. Comparing outages
-// against the value the subscribers were started under is how it tells "still up"
-// from "up again".
+// unhealthyCount is here because healthy on its own cannot express a flap. Going
+// unhealthy breaks every stream open at the time and usually replaces the
+// connection underneath them, so a Supervisor that was busy through one and found
+// a healthy server afterwards still has to restart the subscribers. Comparing
+// unhealthyCount against the value the subscribers were started under is how it
+// tells "still up" from "up again".
 type snapshot struct {
-	healthy bool
-	outages uint64
+	healthy        bool
+	unhealthyCount uint64
 }
 
 // HealthCheck sends periodic gRPC health check RPCs. The traffic they generate
@@ -69,10 +69,10 @@ type HealthCheck struct {
 	fatal      chan error
 
 	// The current snapshot, and the slot the next one goes in.
-	mu      sync.Mutex
-	healthy bool
-	outages uint64
-	updates chan snapshot
+	mu             sync.Mutex
+	healthy        bool
+	unhealthyCount uint64
+	updates        chan snapshot
 
 	interval    time.Duration
 	outageStart time.Time
@@ -236,7 +236,7 @@ func (h *HealthCheck) snapshot() snapshot {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	return snapshot{healthy: h.healthy, outages: h.outages}
+	return snapshot{healthy: h.healthy, unhealthyCount: h.unhealthyCount}
 }
 
 func (h *HealthCheck) setHealthy(healthy bool) {
@@ -249,10 +249,10 @@ func (h *HealthCheck) setHealthy(healthy bool) {
 
 	h.healthy = healthy
 	if !healthy {
-		h.outages++
+		h.unhealthyCount++
 	}
 
-	h.publish(snapshot{healthy: h.healthy, outages: h.outages})
+	h.publish(snapshot{healthy: h.healthy, unhealthyCount: h.unhealthyCount})
 }
 
 // publish leaves the newest snapshot in the one-slot channel, discarding an unread

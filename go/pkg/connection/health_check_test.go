@@ -49,7 +49,7 @@ func TestHealthCheck_Start_ReportsUnhealthyOnTheFirstFailedProbe(t *testing.T) {
 			test.fail(t, connection)
 			go healthCheck.Start()
 
-			awaitSnapshot(t, ctx, healthCheck, snapshot{healthy: false, outages: 1})
+			awaitSnapshot(t, ctx, healthCheck, snapshot{healthy: false, unhealthyCount: 1})
 		})
 	}
 }
@@ -66,7 +66,7 @@ func TestHealthCheck_Start_PublishesNothingFurtherWhileFailuresContinue(t *testi
 	connection.serving(false)
 	go healthCheck.Start()
 
-	awaitSnapshot(t, ctx, healthCheck, snapshot{healthy: false, outages: 1})
+	awaitSnapshot(t, ctx, healthCheck, snapshot{healthy: false, unhealthyCount: 1})
 
 	select {
 	case latest := <-healthCheck.updates:
@@ -84,9 +84,9 @@ func TestHealthCheck_Start_ReportsHealthyWhenTheServerRecovers(t *testing.T) {
 	connection.serving(false)
 	go healthCheck.Start()
 
-	awaitSnapshot(t, ctx, healthCheck, snapshot{healthy: false, outages: 1})
+	awaitSnapshot(t, ctx, healthCheck, snapshot{healthy: false, unhealthyCount: 1})
 	connection.serving(true)
-	awaitSnapshot(t, ctx, healthCheck, snapshot{healthy: true, outages: 1})
+	awaitSnapshot(t, ctx, healthCheck, snapshot{healthy: true, unhealthyCount: 1})
 }
 
 // With no preceding outage there is nothing to recover from, and a Supervisor
@@ -123,11 +123,11 @@ func TestHealthCheck_Start_RestartsTheOutageClockOnRecovery(t *testing.T) {
 
 	// Fail for a while, but recover before the budget runs out.
 	connection.serving(false)
-	awaitSnapshot(t, ctx, healthCheck, snapshot{healthy: false, outages: 1})
+	awaitSnapshot(t, ctx, healthCheck, snapshot{healthy: false, unhealthyCount: 1})
 	time.Sleep(giveUpAfter / 2)
 
 	connection.serving(true)
-	awaitSnapshot(t, ctx, healthCheck, snapshot{healthy: true, outages: 1})
+	awaitSnapshot(t, ctx, healthCheck, snapshot{healthy: true, unhealthyCount: 1})
 
 	secondOutage := time.Now()
 	connection.serving(false)
