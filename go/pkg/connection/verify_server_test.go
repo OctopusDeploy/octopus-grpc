@@ -42,7 +42,6 @@ func TestServerTLSConfig_AcceptsATrustedCertificateForTheServer(t *testing.T) {
 		Thumbprint: strings.Repeat("A", 40),
 		RootCAs:    ca.pool(),
 	}, verifyTestServerName, genuine)
-
 	if err != nil {
 		t.Fatalf("Expected a trusted certificate for the server to be accepted, got %v", err)
 	}
@@ -56,7 +55,6 @@ func TestServerTLSConfig_AcceptsAnUntrustedCertificateWhoseThumbprintMatches(t *
 		Thumbprint: thumbprintOf(genuine),
 		RootCAs:    x509.NewCertPool(),
 	}, verifyTestServerName, genuine)
-
 	if err != nil {
 		t.Fatalf("Expected the thumbprint to carry the connection, got %v", err)
 	}
