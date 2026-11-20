@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0](https://github.com/OctopusDeploy/octopus-grpc/compare/go/v0.5.1...go/v0.6.0) (2026-11-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* verify the server hostname when validating the certificate chain ([#17](https://github.com/OctopusDeploy/octopus-grpc/issues/17))
+
+### Bug Fixes
+
+* verify the server hostname when validating the certificate chain ([#17](https://github.com/OctopusDeploy/octopus-grpc/issues/17)) ([1d5f48f](https://github.com/OctopusDeploy/octopus-grpc/commit/1d5f48f2ef6c6d3b43b4b43bc397c19c25c2d288))
+
 ## [0.5.1](https://github.com/OctopusDeploy/octopus-grpc/compare/go/v0.5.0...go/v0.5.1) (2026-09-08)
 
 
