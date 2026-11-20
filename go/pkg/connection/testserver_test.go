@@ -43,10 +43,19 @@ func startHealthServer(t *testing.T) (string, *health.Server) {
 	return serve(t, healthServer), healthServer
 }
 
+// startTLSHealthServer serves a certificate valid for 127.0.0.1, the address the
+// tests dial, so it passes standard verification once its root is trusted.
 func startTLSHealthServer(t *testing.T) *tlsHealthServer {
 	t.Helper()
 
-	certs := selfSignedTLS(t)
+	return startTLSHealthServerFor(t, nil, []net.IP{net.ParseIP("127.0.0.1")})
+}
+
+// startTLSHealthServerFor serves a certificate valid only for the names given.
+func startTLSHealthServerFor(t *testing.T, dnsNames []string, ips []net.IP) *tlsHealthServer {
+	t.Helper()
+
+	certs := selfSignedTLS(t, dnsNames, ips)
 	addr := serve(t, newServingHealthServer(), grpc.Creds(certs.serverCreds))
 
 	return &tlsHealthServer{addr: addr, thumbprint: certs.thumbprint, roots: certs.roots}
@@ -76,7 +85,7 @@ func serve(t *testing.T, healthServer *health.Server, options ...grpc.ServerOpti
 	return listener.Addr().String()
 }
 
-func selfSignedTLS(t *testing.T) testTLS {
+func selfSignedTLS(t *testing.T, dnsNames []string, ips []net.IP) testTLS {
 	t.Helper()
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -91,7 +100,8 @@ func selfSignedTLS(t *testing.T) testTLS {
 		NotAfter:              time.Now().Add(time.Hour),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+		DNSNames:              dnsNames,
+		IPAddresses:           ips,
 		IsCA:                  true,
 		BasicConstraintsValid: true,
 	}

@@ -2,11 +2,15 @@ package certificate
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha1"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -16,10 +20,8 @@ import (
 )
 
 const (
-	rootCaFilePath                  = "testdata/certs/rootCA.cert.pem"
-	subCaFilePath                   = "testdata/certs/subCA.cert.pem"
-	clientSignedBySubChainFilePath  = "testdata/certs/client_sub_chain.cert.pem"
-	clientSignedByRootChainFilePath = "testdata/certs/client_root_chain.cert.pem"
+	subCaFilePath                  = "testdata/certs/subCA.cert.pem"
+	clientSignedBySubChainFilePath = "testdata/certs/client_sub_chain.cert.pem"
 )
 
 func TestVerifyServerCertificate_ReturnsError_WhenUnexpectedServerCertIsProvided(t *testing.T) {
@@ -97,82 +99,142 @@ func TestParseCertificates_ReturnsCorrectData_ForChainedCertificates(t *testing.
 	}
 }
 
-func TestVerifyServerCertificate_CorrectlyVerifies_WhenUsingSubCaSignedCert_UsingCustomRootCa(t *testing.T) {
-	// arrange
-	clientCerts, err := getCertificates(clientSignedBySubChainFilePath)
-	if err != nil {
-		t.Fatalf("Expected no error getting client certificates, got %v", err)
-	}
-	if len(clientCerts) != 3 {
-		t.Fatalf("Expected 3 certificates, got %d", len(clientCerts))
-	}
-	rootBundle := systemPoolWith(t, rootCaFilePath)
+const testServerName = "octopus.example.com"
 
-	// act/assert
-	err = VerifyServerCertificateWithRoot(clientCerts, rootBundle)
+func TestVerifyServerCertificateWithRoot_Verifies_WhenUsingSubCaSignedCert_UsingCustomRootCa(t *testing.T) {
+	root, chain := newTestChain(t, true, testServerName)
+
+	err := VerifyServerCertificateWithRoot(chain, systemPoolWith(root), testServerName)
 	if err != nil {
 		t.Fatalf("Expected no error verifying server certificate, got %v", err)
 	}
 }
 
-func TestVerifyServerCertificate_DoesNotVerify_WhenUsingSubCaSignedCert_NotUsingCustomRootCa(t *testing.T) {
-	// arrange
-	clientCerts, err := getCertificates(clientSignedBySubChainFilePath)
-	if err != nil {
-		t.Fatalf("Expected no error getting client certificates, got %v", err)
-	}
-	if len(clientCerts) != 3 {
-		t.Fatalf("Expected 3 certificates, got %d", len(clientCerts))
-	}
-	rootBundle := systemPoolWith(t)
+func TestVerifyServerCertificateWithRoot_DoesNotVerify_WhenUsingSubCaSignedCert_NotUsingCustomRootCa(t *testing.T) {
+	_, chain := newTestChain(t, true, testServerName)
 
-	// act/assert
-	err = VerifyServerCertificateWithRoot(clientCerts, rootBundle)
+	err := VerifyServerCertificateWithRoot(chain, systemPoolWith(), testServerName)
 	if err == nil {
 		t.Fatal("Expected error verifying server certificate, got none")
 	}
 }
 
-func TestVerifyServerCertificate_CorrectlyVerifies_WhenUsingRootCaSignedCert_UsingCustomRootCa(t *testing.T) {
-	// arrange
-	clientCerts, err := getCertificates(clientSignedByRootChainFilePath)
-	if err != nil {
-		t.Fatalf("Expected no error getting client certificates, got %v", err)
-	}
-	if len(clientCerts) != 2 {
-		t.Fatalf("Expected 2 certificates, got %d", len(clientCerts))
-	}
-	rootBundle := systemPoolWith(t, rootCaFilePath)
+func TestVerifyServerCertificateWithRoot_Verifies_WhenUsingRootCaSignedCert_UsingCustomRootCa(t *testing.T) {
+	root, chain := newTestChain(t, false, testServerName)
 
-	// act/assert
-	err = VerifyServerCertificateWithRoot(clientCerts, rootBundle)
+	err := VerifyServerCertificateWithRoot(chain, systemPoolWith(root), testServerName)
 	if err != nil {
 		t.Fatalf("Expected no error verifying server certificate, got %v", err)
 	}
 }
 
-// systemPoolWith reproduces what the gateway's InitializeCertificatePool gave these
-// tests: the system roots, plus any bundles named. Passing none is how the gateway
-// test pointed the pool at a directory holding no .pem files.
-func systemPoolWith(t *testing.T, bundlePaths ...string) *x509.CertPool {
-	t.Helper()
+// A certificate that chains to a trusted root is only valid for the hosts it names.
+func TestVerifyServerCertificateWithRoot_DoesNotVerify_WhenServerNameDoesNotMatch(t *testing.T) {
+	root, chain := newTestChain(t, true, "other-host.example.com")
 
+	err := VerifyServerCertificateWithRoot(chain, systemPoolWith(root), testServerName)
+	var hostnameErr x509.HostnameError
+	if !errors.As(err, &hostnameErr) {
+		t.Fatalf("Expected a hostname error, got %v", err)
+	}
+}
+
+func TestVerifyServerCertificateWithRoot_DoesNotVerify_WhenServerNameIsEmpty(t *testing.T) {
+	root, chain := newTestChain(t, true, testServerName)
+
+	err := VerifyServerCertificateWithRoot(chain, systemPoolWith(root), "")
+	if err == nil {
+		t.Fatal("Expected an empty server name to be rejected, it verified")
+	}
+}
+
+// systemPoolWith reproduces what the gateway's InitializeCertificatePool gives
+// callers: the system roots, plus any custom roots.
+func systemPoolWith(roots ...*x509.Certificate) *x509.CertPool {
 	pool, err := x509.SystemCertPool()
 	if err != nil {
 		pool = x509.NewCertPool()
 	}
 
-	for _, path := range bundlePaths {
-		bundle, readErr := os.ReadFile(path)
-		if readErr != nil {
-			t.Fatalf("Expected no error reading %s, got %v", path, readErr)
-		}
-		if !pool.AppendCertsFromPEM(bundle) {
-			t.Fatalf("Expected to parse PEM certificate(s) in file: %s", path)
-		}
+	for _, root := range roots {
+		pool.AddCert(root)
 	}
 
 	return pool
+}
+
+// newTestChain mints a root CA and a leaf valid for dnsName, optionally issued
+// through an intermediate. It returns the root and the chain as a server would
+// present it: leaf first, then any intermediate.
+func newTestChain(t *testing.T, withIntermediate bool, dnsName string) (*x509.Certificate, []*x509.Certificate) {
+	t.Helper()
+
+	root, rootKey := newTestCert(t, &x509.Certificate{
+		Subject:               pkix.Name{CommonName: "Test Root CA"},
+		KeyUsage:              x509.KeyUsageCertSign,
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}, nil, nil)
+
+	issuer, issuerKey := root, rootKey
+	var intermediates []*x509.Certificate
+	if withIntermediate {
+		issuer, issuerKey = newTestCert(t, &x509.Certificate{
+			Subject:               pkix.Name{CommonName: "Test Sub CA"},
+			KeyUsage:              x509.KeyUsageCertSign,
+			IsCA:                  true,
+			BasicConstraintsValid: true,
+		}, root, rootKey)
+		intermediates = append(intermediates, issuer)
+	}
+
+	leaf, _ := newTestCert(t, &x509.Certificate{
+		Subject:     pkix.Name{CommonName: dnsName},
+		DNSNames:    []string{dnsName},
+		KeyUsage:    x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}, issuer, issuerKey)
+
+	return root, append([]*x509.Certificate{leaf}, intermediates...)
+}
+
+// newTestCert signs template with parentKey, or self-signs it when parent is nil.
+func newTestCert(
+	t *testing.T,
+	template *x509.Certificate,
+	parent *x509.Certificate,
+	parentKey *ecdsa.PrivateKey,
+) (*x509.Certificate, *ecdsa.PrivateKey) {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("Expected to generate a key, got %v", err)
+	}
+
+	serial, err := rand.Int(rand.Reader, big.NewInt(1<<62))
+	if err != nil {
+		t.Fatalf("Expected to generate a serial number, got %v", err)
+	}
+	template.SerialNumber = serial
+	template.NotBefore = time.Now().Add(-time.Hour)
+	template.NotAfter = time.Now().Add(time.Hour)
+
+	if parent == nil {
+		parent, parentKey = template, key
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, template, parent, &key.PublicKey, parentKey)
+	if err != nil {
+		t.Fatalf("Expected to create a certificate, got %v", err)
+	}
+
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("Expected to parse the certificate, got %v", err)
+	}
+
+	return cert, key
 }
 
 func getCertificates(filePath string) ([]*x509.Certificate, error) {
