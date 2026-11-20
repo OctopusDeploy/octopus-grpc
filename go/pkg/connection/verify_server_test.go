@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
+	"errors"
 	"math/big"
 	"strings"
 	"testing"
@@ -31,6 +32,31 @@ func TestServerTLSConfig_RejectsATrustedCertificateForAnotherHost(t *testing.T) 
 
 	if err == nil {
 		t.Fatal("Expected a trusted certificate for another host to be rejected, it was accepted")
+	}
+	if !strings.Contains(err.Error(), "does not match the expected thumbprint") {
+		t.Errorf("Expected the thumbprint mismatch in the error, got %v", err)
+	}
+	if _, ok := errors.AsType[x509.HostnameError](err); !ok {
+		t.Errorf("Expected the error to carry the hostname mismatch, got %v", err)
+	}
+}
+
+// Pinning skips the chain entirely, so there is no chain error to report.
+func TestServerTLSConfig_PinnedMismatchReportsOnlyTheThumbprint(t *testing.T) {
+	ca := newVerifyTestCA(t)
+	cert := ca.issue(t, verifyTestServerName)
+
+	err := runVerification(t, TLSConfig{
+		Thumbprint:     strings.Repeat("A", 40),
+		PinCertificate: true,
+		RootCAs:        ca.pool(),
+	}, verifyTestServerName, cert)
+
+	if err == nil || !strings.Contains(err.Error(), "does not match the expected thumbprint") {
+		t.Fatalf("Expected a thumbprint mismatch, got %v", err)
+	}
+	if strings.Contains(err.Error(), "certificate chain validation failed") {
+		t.Errorf("Expected no chain error when pinned, got %v", err)
 	}
 }
 

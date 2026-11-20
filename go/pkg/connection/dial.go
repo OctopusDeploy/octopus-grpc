@@ -75,21 +75,27 @@ func verifyServer(cfg TLSConfig, logger *slog.Logger) func(tls.ConnectionState) 
 			return fmt.Errorf("server presented no certificate")
 		}
 
+		var rootErr error
 		if cfg.PinCertificate {
 			logger.Debug("gRPC certificate pinning enabled, skipping system CA validation")
-		} else if rootErr := certificate.VerifyServerCertificateWithRoot(
-			cs.PeerCertificates,
-			cfg.RootCAs,
-			cs.ServerName,
-		); rootErr == nil {
-			return nil
 		} else {
+			rootErr = certificate.VerifyServerCertificateWithRoot(cs.PeerCertificates, cfg.RootCAs, cs.ServerName)
+			if rootErr == nil {
+				return nil
+			}
 			logger.Debug(
 				"System CA validation failed, falling back to thumbprint verification",
 				slog.Any("error", rootErr),
 			)
 		}
 
-		return certificate.VerifyServerCertificate(cs.PeerCertificates[0], cfg.Thumbprint)
+		thumbprintErr := certificate.VerifyServerCertificate(cs.PeerCertificates[0], cfg.Thumbprint)
+		if thumbprintErr != nil && rootErr != nil {
+			// The thumbprint mismatch alone would hide why the chain was not
+			// trusted, such as the certificate naming a different host.
+			return fmt.Errorf("%w (certificate chain validation failed: %w)", thumbprintErr, rootErr)
+		}
+
+		return thumbprintErr
 	}
 }
