@@ -41,6 +41,37 @@ func TestDial_FallsBackToTheThumbprintWhenTheChainDoesNotVerify(t *testing.T) {
 	}
 }
 
+// A certificate that chains to a trusted root but names another host fails the
+// root check, leaving the thumbprint to decide.
+func TestDial_RejectsATrustedCertificateIssuedForAnotherHost(t *testing.T) {
+	server := startTLSHealthServerFor(t, []string{"other-host.example.com"}, nil)
+
+	err := check(t, Config{
+		ServerURL: server.addr,
+		TLS:       TLSConfig{Thumbprint: strings.Repeat("A", 40), RootCAs: server.roots},
+	})
+	if err == nil {
+		t.Fatal("Expected the call to be rejected, it succeeded")
+	}
+	if !strings.Contains(err.Error(), "does not match the expected thumbprint") {
+		t.Errorf("Expected the thumbprint fallback to reject it, got %v", err)
+	}
+}
+
+// The thumbprint names one exact certificate, so a match is enough even when
+// that certificate does not name the host dialled.
+func TestDial_ThumbprintStillAcceptsACertificateIssuedForAnotherHost(t *testing.T) {
+	server := startTLSHealthServerFor(t, []string{"other-host.example.com"}, nil)
+
+	err := check(t, Config{
+		ServerURL: server.addr,
+		TLS:       TLSConfig{Thumbprint: server.thumbprint, RootCAs: server.roots},
+	})
+	if err != nil {
+		t.Fatalf("Expected the thumbprint to carry the connection, got %v", err)
+	}
+}
+
 func TestDial_RejectsAServerWhoseThumbprintDoesNotMatch(t *testing.T) {
 	server := startTLSHealthServer(t)
 

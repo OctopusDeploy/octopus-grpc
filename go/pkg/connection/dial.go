@@ -2,7 +2,6 @@ package connection
 
 import (
 	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"log/slog"
 
@@ -57,33 +56,46 @@ func serverTLSConfig(cfg TLSConfig, logger *slog.Logger) *tls.Config {
 		return tlsConfig
 	}
 
-	// Standard verification has to be turned off for VerifyPeerCertificate to get
-	// a say at all. The callback replaces that verification rather than dropping
-	// it: every path through it either verifies or returns an error.
+	// Standard verification has to be turned off for VerifyConnection to get a say
+	// when the chain does not verify. The callback replaces that verification
+	// rather than dropping it: every path through it either verifies, hostname
+	// included, or returns an error.
 	tlsConfig.InsecureSkipVerify = true
-	tlsConfig.VerifyPeerCertificate = verifyServer(cfg, logger)
+	tlsConfig.VerifyConnection = verifyServer(cfg, logger)
 
 	return tlsConfig
 }
 
-func verifyServer(cfg TLSConfig, logger *slog.Logger) func([][]byte, [][]*x509.Certificate) error {
-	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-		certs, err := certificate.ParseCertificates(rawCerts)
-		if err != nil {
-			return fmt.Errorf("failed to parse server certificate: %w", err)
+// verifyServer hooks VerifyConnection rather than VerifyPeerCertificate because
+// only the connection state carries the server name gRPC dialled, which the
+// chain check needs to match the certificate against.
+func verifyServer(cfg TLSConfig, logger *slog.Logger) func(tls.ConnectionState) error {
+	return func(cs tls.ConnectionState) error {
+		if len(cs.PeerCertificates) == 0 {
+			return fmt.Errorf("server presented no certificate")
 		}
 
+		var rootErr error
 		if cfg.PinCertificate {
 			logger.Debug("gRPC certificate pinning enabled, skipping system CA validation")
-		} else if rootErr := certificate.VerifyServerCertificateWithRoot(certs, cfg.RootCAs); rootErr == nil {
-			return nil
 		} else {
+			rootErr = certificate.VerifyServerCertificateWithRoot(cs.PeerCertificates, cfg.RootCAs, cs.ServerName)
+			if rootErr == nil {
+				return nil
+			}
 			logger.Debug(
 				"System CA validation failed, falling back to thumbprint verification",
 				slog.Any("error", rootErr),
 			)
 		}
 
-		return certificate.VerifyServerCertificate(certs[0], cfg.Thumbprint)
+		thumbprintErr := certificate.VerifyServerCertificate(cs.PeerCertificates[0], cfg.Thumbprint)
+		if thumbprintErr != nil && rootErr != nil {
+			// The thumbprint mismatch alone would hide why the chain was not
+			// trusted, such as the certificate naming a different host.
+			return fmt.Errorf("%w (certificate chain validation failed: %w)", thumbprintErr, rootErr)
+		}
+
+		return thumbprintErr
 	}
 }

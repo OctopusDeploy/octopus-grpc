@@ -35,23 +35,31 @@ func ParseCertificates(rawCerts [][]byte) ([]*x509.Certificate, error) {
 	return certs, nil
 }
 
-func VerifyServerCertificateWithRoot(certs []*x509.Certificate, rootCertificates *x509.CertPool) error {
-	// Attempt to verify the server certificate against system CAs
+// VerifyServerCertificateWithRoot checks that the leaf chains to rootCertificates
+// and is valid for serverName, as standard TLS verification would. serverName is
+// required because x509 skips the hostname check when it is empty.
+func VerifyServerCertificateWithRoot(
+	certs []*x509.Certificate,
+	rootCertificates *x509.CertPool,
+	serverName string,
+) error {
+	if len(certs) == 0 {
+		return fmt.Errorf("no server certificate provided")
+	}
+	if serverName == "" {
+		return fmt.Errorf("a server name is required to verify the server certificate")
+	}
+
 	opts := x509.VerifyOptions{
 		Roots:         rootCertificates,
 		Intermediates: x509.NewCertPool(),
-		DNSName:       "",
+		DNSName:       serverName,
 	}
 
-	// Add any intermediate certs to the pool
 	for i := 1; i < len(certs); i++ {
 		opts.Intermediates.AddCert(certs[i])
 	}
 
-	// Try system CA validation
-	if _, err := certs[0].Verify(opts); err == nil {
-		return nil
-	} else {
-		return err
-	}
+	_, err := certs[0].Verify(opts)
+	return err
 }
